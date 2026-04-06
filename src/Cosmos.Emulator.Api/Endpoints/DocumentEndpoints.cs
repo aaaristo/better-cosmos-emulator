@@ -101,10 +101,25 @@ public static class DocumentEndpoints
         var body = await ReadBody(context);
         var queryText = body.GetProperty("query").GetString()!;
 
-        // The SDK rewrites ORDER BY queries to include orderByItems for client-side merge.
-        // We detect this, simplify the query, and wrap results in the expected format.
+        // The SDK rewrites queries (ORDER BY, aggregates) with internal wrapper formats.
+        // We detect and simplify them to standard Cosmos SQL.
         var (rewrittenQuery, orderByFields) = RewriteSdkQuery(queryText);
         queryText = rewrittenQuery;
+
+        // Replace table placeholder for aggregate queries that had no FROM clause
+        var quotedTable = $"[{collId.Replace("]", "]]")}]";
+        queryText = queryText.Replace("[__table__]", quotedTable);
+
+        // For raw SQL aggregates only, replace c.field references with column names
+        // The SDK sends e.g. SUM(c.age) — in SQLite this needs to be SUM([age])
+        var isRawSqlQuery = queryText.StartsWith("SELECT json_quote(", StringComparison.OrdinalIgnoreCase)
+                         || queryText.StartsWith("SELECT json_object(", StringComparison.OrdinalIgnoreCase)
+                         || queryText.StartsWith("SELECT json_array(", StringComparison.OrdinalIgnoreCase);
+        if (isRawSqlQuery)
+        {
+            queryText = System.Text.RegularExpressions.Regex.Replace(
+                queryText, @"\bc\.(\w+)", m => $"[{m.Groups[1].Value}]");
+        }
 
         // Parse user-supplied parameters
         Dictionary<string, object>? userParams = null;
@@ -136,18 +151,50 @@ public static class DocumentEndpoints
 
         try
         {
-            var knownColumns = docRepo.GetKnownColumns(dbId, collId);
-            var translated = queryEngine.Translate(queryText, collId, knownColumns, userParams);
+            string sql;
+            var parameters = userParams ?? new Dictionary<string, object>();
 
-            // Inject partition key filter into the translated SQL
-            var sql = translated.Sql;
-            if (partitionKey is not null)
+            // Check if the query was rewritten to raw SQL (aggregates bypass Cosmos SQL parser)
+            var isRawSql = queryText.StartsWith("SELECT json_quote(", StringComparison.OrdinalIgnoreCase)
+                        || queryText.StartsWith("SELECT json_object(", StringComparison.OrdinalIgnoreCase)
+                        || queryText.StartsWith("SELECT json_array(", StringComparison.OrdinalIgnoreCase);
+
+            if (isRawSql)
             {
-                // Insert partition_key filter after "WHERE is_deleted = 0"
-                sql = sql.Replace(
-                    "WHERE is_deleted = 0",
-                    $"WHERE is_deleted = 0 AND partition_key = @__pk");
-                translated.Parameters["@__pk"] = partitionKey;
+                // Already raw SQLite SQL — add WHERE clause for partition key and is_deleted
+                sql = queryText;
+                var table = $"[{collId.Replace("]", "]]")}]";
+
+                // Add WHERE is_deleted = 0 filter
+                if (sql.Contains("FROM", StringComparison.OrdinalIgnoreCase))
+                {
+                    var fromIdx = sql.IndexOf("FROM", StringComparison.OrdinalIgnoreCase);
+                    var afterFrom = sql.IndexOf(' ', fromIdx + 5); // skip "FROM [table]"
+                    if (afterFrom == -1) afterFrom = sql.Length;
+
+                    var whereClause = " WHERE is_deleted = 0";
+                    if (partitionKey is not null)
+                    {
+                        whereClause += " AND partition_key = @__pk";
+                        parameters["@__pk"] = partitionKey;
+                    }
+                    sql = sql[..afterFrom] + whereClause + sql[afterFrom..];
+                }
+            }
+            else
+            {
+                var knownColumns = docRepo.GetKnownColumns(dbId, collId);
+                var translated = queryEngine.Translate(queryText, collId, knownColumns, userParams);
+                sql = translated.Sql;
+                parameters = translated.Parameters;
+
+                if (partitionKey is not null)
+                {
+                    sql = sql.Replace(
+                        "WHERE is_deleted = 0",
+                        $"WHERE is_deleted = 0 AND partition_key = @__pk");
+                    parameters["@__pk"] = partitionKey;
+                }
             }
 
             // Apply max item count as LIMIT if not already present
@@ -156,12 +203,12 @@ public static class DocumentEndpoints
             {
                 int.TryParse(maxItemsHeader.FirstOrDefault(), out maxItems);
             }
-            if (!sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
+            if (!isRawSql && !sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
             {
                 sql += $" LIMIT {maxItems}";
             }
 
-            var results = docRepo.ExecuteQuery(dbId, collId, sql, translated.Parameters);
+            var results = docRepo.ExecuteQuery(dbId, collId, sql, parameters);
 
             // Wrap results for SDK ORDER BY queries
             if (orderByFields is not null)
@@ -462,41 +509,113 @@ public static class DocumentEndpoints
     }
 
     /// <summary>
-    /// The SDK rewrites ORDER BY queries to include orderByItems and payload:
-    ///   SELECT [TOP n] c._rid, [{"item": c.field}] AS orderByItems, c AS payload FROM c ORDER BY ...
-    /// We detect this, execute a simplified query, and wrap results in the expected format.
-    /// Returns (simplifiedQuery, orderByFields) or (originalQuery, null) if not an SDK-rewritten query.
+    /// The SDK rewrites queries to include [{"item": expr}] wrappers:
+    ///
+    /// ORDER BY: SELECT [TOP n] c._rid, [{"item": c.field}] AS orderByItems, c AS payload FROM c ORDER BY ...
+    /// Aggregates: SELECT VALUE [{"item": COUNT(1)}]  (no FROM clause)
+    /// Complex agg: SELECT VALUE [{"item": {"sum": SUM(c.age), "count": COUNT(c.age)}}]
+    ///
+    /// We detect these patterns, simplify to standard Cosmos SQL, and wrap results as needed.
     /// </summary>
     private static (string query, List<string>? orderByFields) RewriteSdkQuery(string query)
     {
-        if (!query.Contains("orderByItems", StringComparison.OrdinalIgnoreCase))
-            return (query, null);
-
-        // Extract ORDER BY fields from the [{"item": c.field}] pattern
-        var orderByFields = new List<string>();
-        var itemMatches = System.Text.RegularExpressions.Regex.Matches(
-            query, @"\{""item"":\s*(\w+)\.(\w+(?:\.\w+)*)\}");
-        foreach (System.Text.RegularExpressions.Match m in itemMatches)
-            orderByFields.Add(m.Groups[2].Value);
-
-        // Extract TOP clause
-        var topMatch = System.Text.RegularExpressions.Regex.Match(
-            query, @"SELECT\s+(TOP\s+\d+)\s+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var topClause = topMatch.Success ? topMatch.Groups[1].Value + " " : "";
-
-        // Extract FROM onwards
-        var fromMatch = System.Text.RegularExpressions.Regex.Match(
-            query, @"(FROM\s+.+)$",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
-
-        if (fromMatch.Success)
+        // Pattern 1: ORDER BY with orderByItems/payload
+        if (query.Contains("orderByItems", StringComparison.OrdinalIgnoreCase))
         {
-            var rest = fromMatch.Groups[1].Value
-                .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim();
-            return ($"SELECT {topClause}* {rest}", orderByFields);
+            var orderByFields = new List<string>();
+            var itemMatches = System.Text.RegularExpressions.Regex.Matches(
+                query, @"\{""item"":\s*(\w+)\.(\w+(?:\.\w+)*)\}");
+            foreach (System.Text.RegularExpressions.Match m in itemMatches)
+                orderByFields.Add(m.Groups[2].Value);
+
+            var topMatch = System.Text.RegularExpressions.Regex.Match(
+                query, @"SELECT\s+(TOP\s+\d+)\s+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var topClause = topMatch.Success ? topMatch.Groups[1].Value + " " : "";
+
+            var fromMatch = System.Text.RegularExpressions.Regex.Match(
+                query, @"(FROM\s+.+)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+            if (fromMatch.Success)
+            {
+                var rest = fromMatch.Groups[1].Value
+                    .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim();
+                return ($"SELECT {topClause}* {rest}", orderByFields);
+            }
+
+            return (query, orderByFields);
         }
 
-        return (query, orderByFields);
+        // Pattern 2: Aggregate with [{ ... }] wrapper
+        // The SDK wraps aggregates in SELECT VALUE [{...}] with various formats:
+        //   SELECT VALUE [{"item": COUNT(1)}] FROM c
+        //   SELECT VALUE [{"item": SUM(c.age)}] FROM c
+        //   SELECT VALUE [{"item": {"sum": SUM(c.age), "count": COUNT(c.age)}}] FROM c
+        //   SELECT VALUE [{"item": MIN(c.age), "item2": {"min": MIN(c.age), "count": COUNT(c.age)}}] FROM c
+        //
+        // Strategy: extract the full JSON-like object between [{ and }], parse all
+        // key-value pairs, and build a json_array(json_object(...)) SQL expression.
+        var aggMatch = System.Text.RegularExpressions.Regex.Match(
+            query, @"SELECT\s+VALUE\s+\[\{(.+)\}\]\s*(FROM\s+.+)?$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        if (aggMatch.Success)
+        {
+            var innerContent = aggMatch.Groups[1].Value.Trim();
+            var fromClause = aggMatch.Groups[2].Success ? aggMatch.Groups[2].Value.Trim() : "";
+
+            // Extract all top-level "key": value pairs from the JSON-like object
+            // Handle both simple values (COUNT(1)) and nested objects ({"sum": SUM(c.age), ...})
+            var jsonParts = new List<string>();
+            var pairMatches = System.Text.RegularExpressions.Regex.Matches(
+                innerContent, @"""(\w+)"":\s*(\{[^}]+\}|\w+\([^)]*\))");
+            foreach (System.Text.RegularExpressions.Match pm in pairMatches)
+            {
+                var key = pm.Groups[1].Value;
+                var val = pm.Groups[2].Value;
+
+                if (val.StartsWith("{"))
+                {
+                    // Nested object — extract inner key:value pairs
+                    var nestedParts = new List<string>();
+                    var nestedMatches = System.Text.RegularExpressions.Regex.Matches(
+                        val, @"""(\w+)"":\s*(\w+\([^)]*\))");
+                    foreach (System.Text.RegularExpressions.Match nm in nestedMatches)
+                        nestedParts.Add($"'{nm.Groups[1].Value}', {nm.Groups[2].Value}");
+                    jsonParts.Add($"'{key}', json_object({string.Join(", ", nestedParts)})");
+                }
+                else
+                {
+                    jsonParts.Add($"'{key}', {val}");
+                }
+            }
+
+            if (jsonParts.Count > 0)
+            {
+                var selectExpr = $"json_array(json_object({string.Join(", ", jsonParts)}))";
+                if (string.IsNullOrEmpty(fromClause))
+                    fromClause = "FROM [__table__]";
+                else
+                    fromClause = NormalizeFromClause(fromClause);
+                return ($"SELECT {selectExpr} {fromClause}"
+                    .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim(), null);
+            }
+        }
+
+        return (query, null);
+    }
+
+    /// <summary>
+    /// Replaces FROM alias (e.g., "FROM c") with "FROM [__table__]" placeholder.
+    /// The actual table name is substituted later.
+    /// </summary>
+    private static string NormalizeFromClause(string fromClause)
+    {
+        // Replace "FROM c" or "FROM c\n" with "FROM [__table__]"
+        return System.Text.RegularExpressions.Regex.Replace(
+            fromClause, @"FROM\s+(\w+)",
+            "FROM [__table__]",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
     /// <summary>
