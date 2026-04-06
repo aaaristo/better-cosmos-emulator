@@ -36,6 +36,7 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 - Databases: create, list, get, delete
 - Containers: create, list, get, replace (with indexing policy updates), delete
 - Documents: create, read, replace, upsert, delete, etag concurrency (If-Match)
+- Patch: Add, Set, Replace, Remove, Increment — nested paths, multiple ops, etag precondition
 - Same document ID in different partitions
 
 ### Queries
@@ -126,16 +127,15 @@ src/
   Cosmos.Emulator.Storage/      # SQLite repositories, schema, hybrid columns
   Cosmos.Emulator.QueryEngine/  # Cosmos SQL → SQLite translator (lexer, parser, AST)
 tests/
-  Cosmos.Emulator.Tests.Integration/  # 55 SDK-based e2e tests
+  Cosmos.Emulator.Tests.Integration/  # 63 SDK-based e2e tests
 ```
 
 ## Current Test Status
 
-55 tests passing, 0 skipped, 0 failing.
+63 tests passing, 0 skipped, 0 failing.
 
 ## Not Yet Implemented
 
-- PATCH operations (Add, Set, Replace, Remove, Increment)
 - TTL document expiration
 - JOIN (intra-document array joins)
 - Indexing policy enforcement (reject queries on excluded paths)
