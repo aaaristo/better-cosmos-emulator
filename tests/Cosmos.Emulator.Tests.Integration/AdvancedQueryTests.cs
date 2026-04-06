@@ -185,7 +185,7 @@ public class AdvancedQueryTests
         ((string)results[0]).ShouldBe("ALICE");
     }
 
-    [Fact(Skip = "GROUP BY with aggregates requires complex SDK query rewriting")]
+    [Fact(Timeout = 10000)]
     public async Task GroupBy_ShouldAggregate()
     {
         var container = await SeedTestData();
@@ -197,7 +197,7 @@ public class AdvancedQueryTests
         results.Count.ShouldBe(2); // Seattle (1), Portland (2)
     }
 
-    [Fact(Skip = "Coalesce with ORDER BY requires SDK payload rewriting support")]
+    [Fact(Timeout = 10000)]
     public async Task CoalesceOperator_ShouldFallback()
     {
         var container = await CreateTempContainer();

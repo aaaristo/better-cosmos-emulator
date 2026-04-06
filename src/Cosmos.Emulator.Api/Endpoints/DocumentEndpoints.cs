@@ -165,20 +165,29 @@ public static class DocumentEndpoints
                 sql = queryText;
                 var table = $"[{collId.Replace("]", "]]")}]";
 
-                // Add WHERE is_deleted = 0 filter
+                // Add WHERE is_deleted = 0 filter — insert before GROUP BY/ORDER BY/LIMIT or at end
                 if (sql.Contains("FROM", StringComparison.OrdinalIgnoreCase))
                 {
-                    var fromIdx = sql.IndexOf("FROM", StringComparison.OrdinalIgnoreCase);
-                    var afterFrom = sql.IndexOf(' ', fromIdx + 5); // skip "FROM [table]"
-                    if (afterFrom == -1) afterFrom = sql.Length;
-
                     var whereClause = " WHERE is_deleted = 0";
                     if (partitionKey is not null)
                     {
                         whereClause += " AND partition_key = @__pk";
                         parameters["@__pk"] = partitionKey;
                     }
-                    sql = sql[..afterFrom] + whereClause + sql[afterFrom..];
+
+                    // Find insertion point: before GROUP BY, ORDER BY, LIMIT, or at end
+                    var insertionPoint = -1;
+                    foreach (var keyword in new[] { "GROUP BY", "ORDER BY", "LIMIT", "HAVING" })
+                    {
+                        var idx = sql.IndexOf(keyword, StringComparison.OrdinalIgnoreCase);
+                        if (idx >= 0 && (insertionPoint < 0 || idx < insertionPoint))
+                            insertionPoint = idx;
+                    }
+
+                    if (insertionPoint >= 0)
+                        sql = sql[..insertionPoint] + whereClause + " " + sql[insertionPoint..];
+                    else
+                        sql += whereClause;
                 }
             }
             else
@@ -524,26 +533,123 @@ public static class DocumentEndpoints
         {
             var orderByFields = new List<string>();
             var itemMatches = System.Text.RegularExpressions.Regex.Matches(
-                query, @"\{""item"":\s*(\w+)\.(\w+(?:\.\w+)*)\}");
+                query, @"AS orderByItems.*?""item"":\s*\w+\.(\w+(?:\.\w+)*)");
             foreach (System.Text.RegularExpressions.Match m in itemMatches)
-                orderByFields.Add(m.Groups[2].Value);
+                orderByFields.Add(m.Groups[1].Value);
 
             var topMatch = System.Text.RegularExpressions.Regex.Match(
                 query, @"SELECT\s+(TOP\s+\d+)\s+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var topClause = topMatch.Success ? topMatch.Groups[1].Value + " " : "";
 
+            // Check if payload is a custom projection (not just "c AS payload")
+            // Match ", {key: expr} AS payload" but NOT ", c AS payload"
+            // Look for the pattern where the char before AS payload is "}" (custom) vs a word char (simple)
+            var hasCustomPayload = System.Text.RegularExpressions.Regex.IsMatch(
+                query, @"\}\s+AS\s+payload\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var customPayloadMatch = hasCustomPayload
+                ? System.Text.RegularExpressions.Regex.Match(
+                    query, @",\s*(\{[^{}]*(?:\([^)]*\))*[^{}]*\})\s+AS\s+payload",
+                    System.Text.RegularExpressions.RegexOptions.Singleline)
+                : System.Text.RegularExpressions.Match.Empty;
+
             var fromMatch = System.Text.RegularExpressions.Regex.Match(
                 query, @"(FROM\s+.+)$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
 
+            if (customPayloadMatch.Success && fromMatch.Success)
+            {
+                // Custom payload like {"displayName": (c.nickname ?? c.name)}
+                var payloadRaw = customPayloadMatch.Groups[1].Value;
+                // Strip outer braces
+                var payloadContent = payloadRaw.TrimStart('{').TrimEnd('}');
+                var payloadParts = new List<string>();
+
+                // Match "key": (expr) or "key": c.field
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                    payloadContent, @"""(\w+)"":\s*(.+?)(?=,\s*""|$)"))
+                {
+                    var key = m.Groups[1].Value;
+                    var expr = m.Groups[2].Value.Trim();
+                    // Replace c.field references with column names
+                    expr = System.Text.RegularExpressions.Regex.Replace(expr, @"\bc\.(\w+)", m2 => $"[{m2.Groups[1].Value}]");
+                    // Handle ?? coalesce → COALESCE
+                    expr = System.Text.RegularExpressions.Regex.Replace(expr, @"\((.+?)\s*\?\?\s*(.+?)\)", "COALESCE($1, $2)");
+                    payloadParts.Add($"'{key}', {expr}");
+                }
+
+                if (payloadParts.Count > 0)
+                {
+                    // Build: json_object('_rid', _rid, 'orderByItems', [...], 'payload', json_object(...))
+                    var obItemParts = orderByFields.Select(f => $"json_object('item', [{f}])").ToList();
+                    var obArray = $"json_array({string.Join(", ", obItemParts)})";
+                    var payloadObj = $"json_object({string.Join(", ", payloadParts)})";
+                    var selectExpr = $"json_object('_rid', rid, 'orderByItems', {obArray}, 'payload', {payloadObj})";
+
+                    var rest = NormalizeFromClause(fromMatch.Groups[1].Value)
+                        .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim();
+                    // This is raw SQL — no orderByFields wrapping needed
+                    return ($"SELECT {topClause}{selectExpr} {rest}", null);
+                }
+            }
+
             if (fromMatch.Success)
             {
+                // Simple payload (c AS payload) — return full documents + wrap later
                 var rest = fromMatch.Groups[1].Value
                     .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim();
                 return ($"SELECT {topClause}* {rest}", orderByFields);
             }
 
             return (query, orderByFields);
+        }
+
+        // Pattern 1b: GROUP BY with groupByItems/payload
+        // SELECT [{"item": c.city}] AS groupByItems, {"city": c.city, "cnt": {"item": COUNT(1)}} AS payload
+        // FROM c GROUP BY c.city
+        //
+        // The SDK expects each result row to have "groupByItems" and "payload" fields.
+        if (query.Contains("groupByItems", StringComparison.OrdinalIgnoreCase))
+        {
+            // Extract group-by fields from [{"item": c.field}] AS groupByItems
+            var groupByFields = new List<string>();
+            var gbItemMatches = System.Text.RegularExpressions.Regex.Matches(
+                query, @"""item"":\s*\w+\.(\w+).*?AS\s+groupByItems");
+            foreach (System.Text.RegularExpressions.Match m in gbItemMatches)
+                groupByFields.Add(m.Groups[1].Value);
+
+            // Extract payload fields
+            var payloadMatch = System.Text.RegularExpressions.Regex.Match(query, @",\s*\{(.+)\}\s+AS\s+payload", System.Text.RegularExpressions.RegexOptions.Singleline);
+            var fromMatch = System.Text.RegularExpressions.Regex.Match(query, @"(FROM\s+.+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
+
+            if (payloadMatch.Success && fromMatch.Success)
+            {
+                var payloadContent = payloadMatch.Groups[1].Value;
+                var payloadParts = new List<string>();
+
+                // Match "key": c.field (non-aggregate)
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(payloadContent, @"""(\w+)"":\s*\w+\.(\w+)(?!\s*\()"))
+                    payloadParts.Add($"'{m.Groups[1].Value}', [{m.Groups[2].Value}]");
+
+                // Match "key": {"item": AGG(expr)} — keep the {"item": value} wrapper
+                foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(payloadContent, @"""(\w+)"":\s*\{""item"":\s*(\w+\([^)]*\))\}"))
+                    payloadParts.Add($"'{m.Groups[1].Value}', json_object('item', {m.Groups[2].Value})");
+
+                if (payloadParts.Count > 0)
+                {
+                    // Build groupByItems array: [{"item": value}] for each group field
+                    var gbItemParts = groupByFields.Select(f => $"json_object('item', [{f}])").ToList();
+                    var gbArray = $"json_array({string.Join(", ", gbItemParts)})";
+
+                    var payloadObj = $"json_object({string.Join(", ", payloadParts)})";
+
+                    // Build the full row: {"groupByItems": [...], "payload": {...}}
+                    var selectExpr = $"json_object('groupByItems', {gbArray}, 'payload', {payloadObj})";
+
+                    var rest = NormalizeFromClause(fromMatch.Groups[1].Value)
+                        .Replace("WHERE (true)\n", "").Replace("WHERE (true)", "").Trim();
+                    return ($"SELECT {selectExpr} {rest}", null);
+                }
+            }
         }
 
         // Pattern 2: Aggregate with [{ ... }] wrapper
