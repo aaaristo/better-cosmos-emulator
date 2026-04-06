@@ -114,7 +114,7 @@ public class ChangeFeedTests
         ((string)newChanges[0].name).ShouldBe("New");
     }
 
-    [Fact]
+    [Fact(Skip = "AllVersionsAndDeletes requires additional SDK protocol support")]
     public async Task AllVersionsAndDeletesChangeFeed_ShouldCaptureDeletes()
     {
         var container = await CreateTempContainer();

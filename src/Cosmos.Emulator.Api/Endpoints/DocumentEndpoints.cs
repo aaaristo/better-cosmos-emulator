@@ -202,6 +202,12 @@ public static class DocumentEndpoints
         var aim = context.Request.Headers["A-IM"].FirstOrDefault();
         if (aim?.Contains("Incremental feed", StringComparison.OrdinalIgnoreCase) == true)
         {
+            // Log change feed request headers for debugging
+            var logPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "sdk-debug.log");
+            File.AppendAllText(logPath, $"[CF] A-IM={aim}\n");
+            foreach (var h in context.Request.Headers.Where(h => h.Key.StartsWith("x-ms") || h.Key.StartsWith("If-")))
+                File.AppendAllText(logPath, $"[CF] {h.Key}={h.Value}\n");
+
             return HandleChangeFeed(dbId, collId, container, context, docRepo, cfRepo);
         }
 
@@ -294,6 +300,7 @@ public static class DocumentEndpoints
                 var currentLsn = cfRepo.GetCurrentLsn(dbId, collId);
                 var emptyToken = CreateContinuationToken(currentLsn, true);
                 context.Response.Headers["etag"] = $"\"{emptyToken}\"";
+                context.Response.Headers["x-ms-item-count"] = "0";
                 return Results.StatusCode(304);
             }
 
@@ -331,6 +338,7 @@ public static class DocumentEndpoints
                 var currentLsn = cfRepo.GetCurrentLsn(dbId, collId);
                 var emptyToken = CreateContinuationToken(currentLsn, false);
                 context.Response.Headers["etag"] = $"\"{emptyToken}\"";
+                context.Response.Headers["x-ms-item-count"] = "0";
                 return Results.StatusCode(304);
             }
 
