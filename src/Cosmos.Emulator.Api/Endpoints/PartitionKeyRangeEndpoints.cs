@@ -42,10 +42,11 @@ public static class PartitionKeyRangeEndpoints
         {
             // Subsequent call — no new changes. Return new etag so SDK doesn't think cache is stale.
             var newEtag = $"\"{Guid.NewGuid():N}\"";
+            context.Response.StatusCode = 304;
             context.Response.Headers["etag"] = newEtag;
             context.Response.Headers["x-ms-item-count"] = "0";
             context.Response.Headers["x-ms-session-token"] = "0:-1#1";
-            return Results.StatusCode(304);
+            return Results.Empty;
         }
 
         // First call or non-change-feed request — return the full pkranges
