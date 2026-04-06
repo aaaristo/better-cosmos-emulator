@@ -25,6 +25,11 @@ public class LoggingHandler : DelegatingHandler
         Log($"--- New session {DateTime.Now:O} ---");
     }
 
+    public LoggingHandler(HttpMessageHandler inner) : base(inner)
+    {
+        Log($"--- New session {DateTime.Now:O} ---");
+    }
+
     private static void Log(string msg)
     {
         lock (Lock) File.AppendAllText(LogFile, msg + "\n");
@@ -44,7 +49,17 @@ public class LoggingHandler : DelegatingHandler
             throw;
         }
         Log($"[SDK] => {(int)response.StatusCode} {response.StatusCode}");
-        if ((int)response.StatusCode >= 400)
+        // Log bodies and request headers for docs endpoint
+        if (request.RequestUri?.PathAndQuery.EndsWith("/docs") == true)
+        {
+            Log($"[SDK] Request headers:");
+            foreach (var h in request.Headers)
+                Log($"[SDK]   {h.Key}: {string.Join(", ", h.Value)}");
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            Log($"[SDK] Body ({body.Length}c): {body[..Math.Min(body.Length, 800)]}");
+            response.Content = new StringContent(body, System.Text.Encoding.UTF8, response.Content.Headers.ContentType?.MediaType ?? "application/json");
+        }
+        else if ((int)response.StatusCode >= 400)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             Log($"[SDK] Body: {body[..Math.Min(body.Length, 500)]}");
@@ -135,10 +150,7 @@ public class EmulatorFixture : IAsyncLifetime
             ServerCertificateCustomValidationCallback = (_, _, _, _) => true
         };
 
-        // BufferingHandler: reads the chunked response body and re-creates it
-        // with Content-Length. The SDK's Newtonsoft.Json reader may not handle
-        // Kestrel's chunked transfer encoding correctly.
-        var bufferingHandler = new BufferingHandler(handler);
+        var loggingHandler = new LoggingHandler(handler);
 
         Client = new CosmosClient(
             baseUrl,
@@ -149,7 +161,7 @@ public class EmulatorFixture : IAsyncLifetime
                 LimitToEndpoint = true,
                 MaxRetryAttemptsOnRateLimitedRequests = 0,
                 RequestTimeout = TimeSpan.FromSeconds(5),
-                HttpClientFactory = () => new HttpClient(bufferingHandler, disposeHandler: false)
+                HttpClientFactory = () => new HttpClient(loggingHandler, disposeHandler: false)
             });
     }
 

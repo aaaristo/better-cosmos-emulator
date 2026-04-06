@@ -44,6 +44,9 @@ public class ChangeFeedMetadata
     [JsonPropertyName("crts")]
     public long Crts { get; set; }
 
+    [JsonPropertyName("previousImageLSN")]
+    public long PreviousImageLSN { get; set; }
+
     [JsonPropertyName("timeToLiveExpired")]
     public bool TimeToLiveExpired { get; set; }
 }

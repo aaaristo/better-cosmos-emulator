@@ -199,15 +199,12 @@ public static class DocumentEndpoints
             return Results.Json(new { code = "NotFound", message = $"Container '{collId}' not found." }, statusCode: 404);
 
         // Check for change feed request
+        // LatestVersion uses "A-IM: Incremental Feed"
+        // AllVersionsAndDeletes uses "A-IM: Full-Fidelity Feed"
         var aim = context.Request.Headers["A-IM"].FirstOrDefault();
-        if (aim?.Contains("Incremental feed", StringComparison.OrdinalIgnoreCase) == true)
+        if (aim is not null && (aim.Contains("Incremental", StringComparison.OrdinalIgnoreCase)
+                             || aim.Contains("Full-Fidelity", StringComparison.OrdinalIgnoreCase)))
         {
-            // Log change feed request headers for debugging
-            var logPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "sdk-debug.log");
-            File.AppendAllText(logPath, $"[CF] A-IM={aim}\n");
-            foreach (var h in context.Request.Headers.Where(h => h.Key.StartsWith("x-ms") || h.Key.StartsWith("If-")))
-                File.AppendAllText(logPath, $"[CF] {h.Key}={h.Value}\n");
-
             return HandleChangeFeed(dbId, collId, container, context, docRepo, cfRepo);
         }
 
@@ -272,7 +269,9 @@ public static class DocumentEndpoints
         }
 
         var changeFeedMode = context.Request.Headers["x-ms-cosmos-changefeed-mode"].FirstOrDefault();
-        var isAllVersions = changeFeedMode?.Equals("AllVersionsAndDeletes", StringComparison.OrdinalIgnoreCase) == true;
+        var aimHeader = context.Request.Headers["A-IM"].FirstOrDefault() ?? "";
+        var isAllVersions = changeFeedMode?.Equals("AllVersionsAndDeletes", StringComparison.OrdinalIgnoreCase) == true
+                         || aimHeader.Contains("Full-Fidelity", StringComparison.OrdinalIgnoreCase);
 
         // Parse continuation token from If-None-Match header
         long afterLsn = 0;
