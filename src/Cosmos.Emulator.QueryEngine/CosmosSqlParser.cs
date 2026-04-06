@@ -121,21 +121,13 @@ public class CosmosSqlParser
             orderBy = ParseOrderByList();
         }
 
-        int? offset = null;
-        int? limit = null;
+        Expression? offset = null;
+        Expression? limit = null;
         if (Match(TokenType.Offset))
         {
-            offset = int.Parse(ParsePrimary() switch
-            {
-                LiteralExpression lit => lit.Value?.ToString() ?? "0",
-                _ => throw new FormatException("OFFSET must be a number")
-            });
+            offset = ParsePrimary();
             Expect(TokenType.Limit);
-            limit = int.Parse(ParsePrimary() switch
-            {
-                LiteralExpression lit => lit.Value?.ToString() ?? "0",
-                _ => throw new FormatException("LIMIT must be a number")
-            });
+            limit = ParsePrimary();
         }
 
         return new SelectStatement(isDistinct, top, isValue, selectItems, fromAlias, joins, where, orderBy, offset, limit, groupBy, having);

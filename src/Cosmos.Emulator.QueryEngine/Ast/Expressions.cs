@@ -11,8 +11,8 @@ public record SelectStatement(
     List<JoinClause>? Joins,
     Expression? Where,
     List<OrderByItem>? OrderBy,
-    int? Offset,
-    int? Limit,
+    Expression? Offset,
+    Expression? Limit,
     List<Expression>? GroupBy,
     Expression? Having) : Expression;
 

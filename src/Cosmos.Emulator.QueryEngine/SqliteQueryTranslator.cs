@@ -144,11 +144,11 @@ public class SqliteQueryTranslator
         {
             sb.Append($" LIMIT {stmt.Top.Value}");
         }
-        else if (stmt.Limit.HasValue)
+        else if (stmt.Limit is not null)
         {
-            sb.Append($" LIMIT {stmt.Limit.Value}");
-            if (stmt.Offset.HasValue)
-                sb.Append($" OFFSET {stmt.Offset.Value}");
+            sb.Append($" LIMIT {ResolveIntExpression(stmt.Limit)}");
+            if (stmt.Offset is not null)
+                sb.Append($" OFFSET {ResolveIntExpression(stmt.Offset)}");
         }
 
         return new TranslatedQuery
@@ -476,6 +476,24 @@ public class SqliteQueryTranslator
         FunctionCall fn => fn.Name.ToLowerInvariant(),
         _ => "$1"
     };
+
+    /// <summary>
+    /// Resolves an expression to an integer for OFFSET/LIMIT.
+    /// Handles literal numbers and parameter references.
+    /// </summary>
+    private string ResolveIntExpression(Expression expr)
+    {
+        if (expr is LiteralExpression lit)
+            return lit.Value?.ToString() ?? "0";
+        if (expr is ParameterExpression param)
+        {
+            // Resolve parameter to its value and inline it
+            if (_parameters.TryGetValue(param.Name, out var val))
+                return val.ToString() ?? "0";
+            return param.Name; // pass through as SQLite parameter
+        }
+        return TranslateExpression(expr);
+    }
 
     private static string EscapeJsonPath(string segment) => segment.Replace("'", "\\'");
     private static string EscapeSqlString(string value) => value.Replace("'", "''");
