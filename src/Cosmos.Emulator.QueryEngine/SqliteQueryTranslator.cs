@@ -63,6 +63,8 @@ public class SqliteQueryTranslator
                 var item = stmt.SelectItems[i];
                 var alias = item.Alias ?? GetExpressionAlias(item.Expr);
                 var translated = TranslateExpression(item.Expr);
+                // Wrap body references with json() for proper sub-object embedding
+                if (translated == "body") translated = "json(body)";
                 sb.Append($"'{alias}', {translated}");
             }
             sb.Append(')');
@@ -148,6 +150,8 @@ public class SqliteQueryTranslator
         BetweenExpression be => TranslateBetween(be),
         CoalesceExpression ce => $"COALESCE({TranslateExpression(ce.Left)}, {TranslateExpression(ce.Right)})",
         ArrayIndexAccess aia => TranslateArrayIndex(aia),
+        ObjectExpression obj => TranslateObject(obj),
+        ArrayExpression arr => TranslateArray(arr),
         SelectStar => "body",
         _ => throw new NotSupportedException($"Expression type {expr.GetType().Name} not supported")
     };
@@ -324,6 +328,35 @@ public class SqliteQueryTranslator
 
         var translated = TranslateExpression(arrayExpr);
         return $"EXISTS (SELECT 1 FROM json_each({translated}) WHERE json_each.value = {valueExpr})";
+    }
+
+    /// <summary>
+    /// {"key": expr, ...} → json_object('key', expr, ...)
+    /// When a value resolves to 'body' (full document column), wraps in json()
+    /// so SQLite embeds it as a JSON sub-object, not a string.
+    /// </summary>
+    private string TranslateObject(ObjectExpression obj)
+    {
+        var parts = obj.Properties.Select(p =>
+        {
+            var val = TranslateExpression(p.Value);
+            if (val == "body") val = "json(body)";
+            return $"'{EscapeSqlString(p.Key)}', {val}";
+        });
+        return $"json_object({string.Join(", ", parts)})";
+    }
+
+    /// <summary>
+    /// [expr, ...] → json_array(expr, ...)
+    /// </summary>
+    private string TranslateArray(ArrayExpression arr)
+    {
+        var parts = arr.Elements.Select(e =>
+        {
+            var val = TranslateExpression(e);
+            return val == "body" ? "json(body)" : val;
+        });
+        return $"json_array({string.Join(", ", parts)})";
     }
 
     private string TranslateIn(InExpression ine)

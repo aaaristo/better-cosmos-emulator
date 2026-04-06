@@ -45,6 +45,8 @@ public record ParameterExpression(string Name) : Expression;
 
 public record ArrayExpression(List<Expression> Elements) : Expression;
 
+public record ObjectExpression(List<(string Key, Expression Value)> Properties) : Expression;
+
 public record SubqueryExpression(SelectStatement Subquery) : Expression;
 
 public record ExistsExpression(SelectStatement Subquery) : Expression;

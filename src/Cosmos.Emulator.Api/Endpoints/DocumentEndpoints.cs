@@ -102,26 +102,6 @@ public static class DocumentEndpoints
         var body = await ReadBody(context);
         var queryText = body.GetProperty("query").GetString()!;
 
-        // The SDK rewrites queries (ORDER BY, aggregates) with internal wrapper formats.
-        // We detect and simplify them to standard Cosmos SQL.
-        var (rewrittenQuery, orderByFields) = RewriteSdkQuery(queryText);
-        queryText = rewrittenQuery;
-
-        // Replace table placeholder for aggregate queries that had no FROM clause
-        var quotedTable = $"[{collId.Replace("]", "]]")}]";
-        queryText = queryText.Replace("[__table__]", quotedTable);
-
-        // For raw SQL aggregates only, replace c.field references with column names
-        // The SDK sends e.g. SUM(c.age) — in SQLite this needs to be SUM([age])
-        var isRawSqlQuery = queryText.StartsWith("SELECT json_quote(", StringComparison.OrdinalIgnoreCase)
-                         || queryText.StartsWith("SELECT json_object(", StringComparison.OrdinalIgnoreCase)
-                         || queryText.StartsWith("SELECT json_array(", StringComparison.OrdinalIgnoreCase);
-        if (isRawSqlQuery)
-        {
-            queryText = System.Text.RegularExpressions.Regex.Replace(
-                queryText, @"\bc\.(\w+)", m => $"[{m.Groups[1].Value}]");
-        }
-
         // Parse user-supplied parameters
         Dictionary<string, object>? userParams = null;
         if (body.TryGetProperty("parameters", out var paramsProp) && paramsProp.ValueKind == JsonValueKind.Array)
@@ -143,7 +123,6 @@ public static class DocumentEndpoints
             }
         }
 
-        // Add partition key filter if provided
         string? partitionKey = null;
         if (context.Request.Headers.TryGetValue("x-ms-documentdb-partitionkey", out var pkHeader))
         {
@@ -152,62 +131,22 @@ public static class DocumentEndpoints
 
         try
         {
-            string sql;
-            var parameters = userParams ?? new Dictionary<string, object>();
+            // All queries — including SDK-rewritten ones with JSON object/array literals —
+            // go through the Cosmos SQL parser natively.
+            var knownColumns = docRepo.GetKnownColumns(dbId, collId);
+            var translated = queryEngine.Translate(queryText, collId, knownColumns, userParams);
+            var sql = translated.Sql;
+            var parameters = translated.Parameters;
 
-            // Check if the query was rewritten to raw SQL (aggregates bypass Cosmos SQL parser)
-            var isRawSql = queryText.StartsWith("SELECT json_quote(", StringComparison.OrdinalIgnoreCase)
-                        || queryText.StartsWith("SELECT json_object(", StringComparison.OrdinalIgnoreCase)
-                        || queryText.StartsWith("SELECT json_array(", StringComparison.OrdinalIgnoreCase);
-
-            if (isRawSql)
+            if (partitionKey is not null)
             {
-                // Already raw SQLite SQL — add WHERE clause for partition key and is_deleted
-                sql = queryText;
-                var table = $"[{collId.Replace("]", "]]")}]";
-
-                // Add WHERE is_deleted = 0 filter — insert before GROUP BY/ORDER BY/LIMIT or at end
-                if (sql.Contains("FROM", StringComparison.OrdinalIgnoreCase))
-                {
-                    var whereClause = " WHERE is_deleted = 0";
-                    if (partitionKey is not null)
-                    {
-                        whereClause += " AND partition_key = @__pk";
-                        parameters["@__pk"] = partitionKey;
-                    }
-
-                    // Find insertion point: before GROUP BY, ORDER BY, LIMIT, or at end
-                    var insertionPoint = -1;
-                    foreach (var keyword in new[] { "GROUP BY", "ORDER BY", "LIMIT", "HAVING" })
-                    {
-                        var idx = sql.IndexOf(keyword, StringComparison.OrdinalIgnoreCase);
-                        if (idx >= 0 && (insertionPoint < 0 || idx < insertionPoint))
-                            insertionPoint = idx;
-                    }
-
-                    if (insertionPoint >= 0)
-                        sql = sql[..insertionPoint] + whereClause + " " + sql[insertionPoint..];
-                    else
-                        sql += whereClause;
-                }
-            }
-            else
-            {
-                var knownColumns = docRepo.GetKnownColumns(dbId, collId);
-                var translated = queryEngine.Translate(queryText, collId, knownColumns, userParams);
-                sql = translated.Sql;
-                parameters = translated.Parameters;
-
-                if (partitionKey is not null)
-                {
-                    sql = sql.Replace(
-                        "WHERE is_deleted = 0",
-                        $"WHERE is_deleted = 0 AND partition_key = @__pk");
-                    parameters["@__pk"] = partitionKey;
-                }
+                sql = sql.Replace(
+                    "WHERE is_deleted = 0",
+                    $"WHERE is_deleted = 0 AND partition_key = @__pk");
+                parameters["@__pk"] = partitionKey;
             }
 
-            // Apply max item count as LIMIT and handle continuation (offset)
+            // Apply max item count and continuation
             var maxItems = 100;
             if (context.Request.Headers.TryGetValue("x-ms-max-item-count", out var maxItemsHeader))
             {
@@ -228,7 +167,7 @@ public static class DocumentEndpoints
                 catch { }
             }
 
-            if (!isRawSql && !sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
+            if (!sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
             {
                 sql += $" LIMIT {maxItems}";
                 if (queryOffset > 0)
@@ -237,13 +176,8 @@ public static class DocumentEndpoints
 
             var results = docRepo.ExecuteQuery(dbId, collId, sql, parameters);
 
-            // Wrap results for SDK ORDER BY queries
-            if (orderByFields is not null)
-                results = WrapOrderByResults(results, orderByFields);
-
             context.Response.Headers["x-ms-item-count"] = results.Count.ToString();
 
-            // Set continuation if we got a full page
             if (results.Count == maxItems)
             {
                 var nextToken = Convert.ToBase64String(
@@ -715,16 +649,8 @@ public static class DocumentEndpoints
         return Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(obj));
     }
 
-    /// <summary>
-    /// The SDK rewrites queries to include [{"item": expr}] wrappers:
-    ///
-    /// ORDER BY: SELECT [TOP n] c._rid, [{"item": c.field}] AS orderByItems, c AS payload FROM c ORDER BY ...
-    /// Aggregates: SELECT VALUE [{"item": COUNT(1)}]  (no FROM clause)
-    /// Complex agg: SELECT VALUE [{"item": {"sum": SUM(c.age), "count": COUNT(c.age)}}]
-    ///
-    /// We detect these patterns, simplify to standard Cosmos SQL, and wrap results as needed.
-    /// </summary>
-    private static (string query, List<string>? orderByFields) RewriteSdkQuery(string query)
+    /* Legacy methods removed — see git history.
+    private static (string query, List<string>? orderByFields) _removed_RewriteSdkQuery(string query)
     {
         // Pattern 1: ORDER BY with orderByItems/payload
         if (query.Contains("orderByItems", StringComparison.OrdinalIgnoreCase))
@@ -968,6 +894,7 @@ public static class DocumentEndpoints
         }
         return wrapped;
     }
+    */
 
     private static async Task<JsonElement> ReadBody(HttpContext context)
     {

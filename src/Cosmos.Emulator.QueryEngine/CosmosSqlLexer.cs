@@ -13,7 +13,7 @@ public enum TokenType
     Plus, Minus, Star, Slash, Percent, Pipe, QuestionQuestion,
 
     // Punctuation
-    Dot, Comma, LeftParen, RightParen, LeftBracket, RightBracket,
+    Dot, Comma, Colon, LeftParen, RightParen, LeftBracket, RightBracket, LeftBrace, RightBrace,
 
     // Keywords
     Select, From, Where, And, Or, Not, In, Between, Like,
@@ -101,6 +101,9 @@ public class CosmosSqlLexer
                 ')' => MakeToken(TokenType.RightParen, ")"),
                 '[' => MakeToken(TokenType.LeftBracket, "["),
                 ']' => MakeToken(TokenType.RightBracket, "]"),
+                '{' => MakeToken(TokenType.LeftBrace, "{"),
+                '}' => MakeToken(TokenType.RightBrace, "}"),
+                ':' => MakeToken(TokenType.Colon, ":"),
                 '+' => MakeToken(TokenType.Plus, "+"),
                 '-' => ReadMinusOrNumber(),
                 '*' => MakeToken(TokenType.Star, "*"),

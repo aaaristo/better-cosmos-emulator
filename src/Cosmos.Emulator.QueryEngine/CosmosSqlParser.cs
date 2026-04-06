@@ -399,6 +399,9 @@ public class CosmosSqlParser
                 Expect(TokenType.RightParen);
                 return inner;
 
+            case TokenType.LeftBrace:
+                return ParseObjectLiteral();
+
             case TokenType.LeftBracket:
                 return ParseArrayLiteral();
 
@@ -437,6 +440,35 @@ public class CosmosSqlParser
             default:
                 throw new FormatException($"Unexpected token {Current.Type} ('{Current.Value}') at position {Current.Position}");
         }
+    }
+
+    private Expression ParseObjectLiteral()
+    {
+        Expect(TokenType.LeftBrace);
+        var properties = new List<(string Key, Expression Value)>();
+        if (!Check(TokenType.RightBrace))
+        {
+            properties.Add(ParseObjectProperty());
+            while (Match(TokenType.Comma))
+                properties.Add(ParseObjectProperty());
+        }
+        Expect(TokenType.RightBrace);
+        return new ObjectExpression(properties);
+    }
+
+    private (string Key, Expression Value) ParseObjectProperty()
+    {
+        string key;
+        if (Check(TokenType.StringLiteral))
+            key = Advance().Value;
+        else if (Check(TokenType.Identifier))
+            key = Advance().Value;
+        else
+            throw new FormatException($"Expected property name but got {Current.Type} at position {Current.Position}");
+
+        Expect(TokenType.Colon);
+        var value = ParseExpression();
+        return (key, value);
     }
 
     private Expression ParseArrayLiteral()
