@@ -137,7 +137,7 @@ tests/
 
 ## Current Test Status
 
-71 integration tests + 1 unit test. 0 skipped.
+74 integration tests + 1 unit test. 0 skipped.
 
 ## Debugging Failing Tests
 
@@ -172,7 +172,5 @@ tests/
 
 ## Not Yet Implemented
 
-- TTL document expiration
 - Indexing policy enforcement (reject queries on excluded paths)
 - HMAC-SHA256 auth validation
-- Pagination (x-ms-continuation) for list endpoints
