@@ -86,6 +86,58 @@ public class TtlTests
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
+    [Fact]
+    public async Task ContainerWithTtl_ExpirationAppearsInChangeFeed()
+    {
+        var db = await CreateTempDatabase();
+
+        var props = new ContainerProperties($"ttl-{Guid.NewGuid():N}"[..20], "/pk")
+        {
+            DefaultTimeToLive = 2
+        };
+        var container = (await db.CreateContainerAsync(props)).Container;
+
+        // Insert document that will expire
+        await container.CreateItemAsync(
+            new { id = "1", pk = "a", name = "willExpire" },
+            new PartitionKey("a"));
+
+        // Read change feed from beginning — should see the create
+        var feedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.AllVersionsAndDeletes);
+
+        var createChanges = new List<dynamic>();
+        while (feedIterator.HasMoreResults)
+        {
+            var response = await feedIterator.ReadNextAsync();
+            if (response.StatusCode == HttpStatusCode.NotModified)
+                break;
+            createChanges.AddRange(response);
+        }
+        createChanges.Count.ShouldBeGreaterThanOrEqualTo(1);
+
+        // Wait for TTL expiration
+        await Task.Delay(TimeSpan.FromSeconds(8));
+
+        // Read change feed again — should see the delete from TTL
+        var allChanges = new List<dynamic>();
+        var iterator2 = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.AllVersionsAndDeletes);
+
+        while (iterator2.HasMoreResults)
+        {
+            var response = await iterator2.ReadNextAsync();
+            if (response.StatusCode == HttpStatusCode.NotModified)
+                break;
+            allChanges.AddRange(response);
+        }
+
+        // Should have at least create + delete (from TTL expiration)
+        allChanges.Count.ShouldBeGreaterThanOrEqualTo(2);
+    }
+
     private async Task<Database> CreateTempDatabase()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";

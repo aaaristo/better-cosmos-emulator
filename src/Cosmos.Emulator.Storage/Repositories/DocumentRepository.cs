@@ -176,7 +176,7 @@ public class DocumentRepository
         return (document, newLsn);
     }
 
-    public long Delete(string databaseId, string containerId, string documentId, string partitionKey)
+    public long Delete(string databaseId, string containerId, string documentId, string partitionKey, bool ttlExpired = false)
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         using var tx = conn.BeginTransaction();
@@ -194,10 +194,54 @@ public class DocumentRepository
 
         var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         InsertChangeFeedEntry(conn, containerId, documentId, partitionKey,
-            "delete", null, prevBody, ts, "");
+            "delete", null, prevBody, ts, "", ttlExpired);
 
         tx.Commit();
         return newLsn;
+    }
+
+    /// <summary>
+    /// Finds documents that have expired based on TTL rules.
+    /// Returns (id, partitionKey) pairs for each expired document.
+    /// </summary>
+    /// <summary>
+    /// Yields expired documents one at a time to avoid loading all into memory.
+    /// Caller should delete each document individually (which writes to change feed atomically).
+    /// </summary>
+    public IEnumerable<(string id, string partitionKey)> FindExpiredDocuments(string databaseId, string containerId, int defaultTtl, long now)
+    {
+        using var conn = _storage.GetDatabaseConnection(databaseId);
+        var table = Q(containerId);
+
+        using var cmd = conn.CreateCommand();
+        if (defaultTtl > 0)
+        {
+            cmd.CommandText = $"""
+                SELECT id, partition_key FROM {table}
+                WHERE is_deleted = 0 AND (
+                    (json_extract(body, '$.ttl') > 0 AND ts + json_extract(body, '$.ttl') <= @now)
+                    OR
+                    (json_extract(body, '$.ttl') IS NULL AND ts + @defaultTtl <= @now)
+                )
+                AND COALESCE(json_extract(body, '$.ttl'), 0) != -1
+                """;
+            cmd.Parameters.AddWithValue("@now", now);
+            cmd.Parameters.AddWithValue("@defaultTtl", defaultTtl);
+        }
+        else
+        {
+            cmd.CommandText = $"""
+                SELECT id, partition_key FROM {table}
+                WHERE is_deleted = 0
+                AND json_extract(body, '$.ttl') > 0
+                AND ts + json_extract(body, '$.ttl') <= @now
+                """;
+            cmd.Parameters.AddWithValue("@now", now);
+        }
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            yield return (reader.GetString(0), reader.GetString(1));
     }
 
     public bool Exists(string databaseId, string containerId, string documentId, string partitionKey)
@@ -364,7 +408,7 @@ public class DocumentRepository
     }
 
     private static void InsertChangeFeedEntry(SqliteConnection conn, string containerId,
-        string docId, string pk, string operation, string? body, string? prevBody, long ts, string etag)
+        string docId, string pk, string operation, string? body, string? prevBody, long ts, string etag, bool ttlExpired = false)
     {
         var cfTable = Q(containerId + "__cf");
         using var cmd = conn.CreateCommand();
