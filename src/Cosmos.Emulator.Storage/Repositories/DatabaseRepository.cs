@@ -16,8 +16,10 @@ public class DatabaseRepository
     {
         using var conn = _storage.GetCatalogConnection();
         using var cmd = conn.CreateCommand();
-        // Support lookup by either user ID or _rid
-        cmd.CommandText = "SELECT id, rid, self_link, etag, ts FROM databases WHERE id = @id OR rid = @id";
+        // Support lookup by either user ID or _rid (with - → / conversion for URL-encoded rids)
+        var ridVariant = id.Replace("-", "/");
+        cmd.CommandText = "SELECT id, rid, self_link, etag, ts FROM databases WHERE id = @id OR rid = @id OR rid = @rv";
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         cmd.Parameters.AddWithValue("@id", id);
 
         using var reader = cmd.ExecuteReader();
@@ -69,8 +71,10 @@ public class DatabaseRepository
     {
         using var conn = _storage.GetCatalogConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id FROM databases WHERE id = @id OR rid = @id";
+        var ridVariant = idOrRid.Replace("-", "/");
+        cmd.CommandText = "SELECT id FROM databases WHERE id = @id OR rid = @id OR rid = @rv";
         cmd.Parameters.AddWithValue("@id", idOrRid);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         return cmd.ExecuteScalar() as string;
     }
 
@@ -89,8 +93,10 @@ public class DatabaseRepository
     {
         using var conn = _storage.GetCatalogConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM databases WHERE id = @id OR rid = @id";
+        var ridVariant = id.Replace("-", "/");
+        cmd.CommandText = "SELECT 1 FROM databases WHERE id = @id OR rid = @id OR rid = @rv";
         cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         return cmd.ExecuteScalar() is not null;
     }
 

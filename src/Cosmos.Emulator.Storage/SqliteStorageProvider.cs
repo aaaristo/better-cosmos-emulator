@@ -38,8 +38,11 @@ public class SqliteStorageProvider
     {
         using var conn = GetCatalogConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id FROM databases WHERE rid = @rid";
+        // SDK replaces / with - in _rid URL paths
+        var ridVariant = idOrRid.Replace("-", "/");
+        cmd.CommandText = "SELECT id FROM databases WHERE rid = @rid OR rid = @rv";
         cmd.Parameters.AddWithValue("@rid", idOrRid);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         var result = cmd.ExecuteScalar() as string;
         return result ?? idOrRid;
     }

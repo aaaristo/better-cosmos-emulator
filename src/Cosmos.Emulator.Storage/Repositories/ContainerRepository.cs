@@ -29,11 +29,15 @@ public class ContainerRepository
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         using var cmd = conn.CreateCommand();
+        // The SDK replaces '/' with '-' in _rid values when building URL paths.
+        // We need to check both the original and the URL-encoded form.
+        var ridVariant = containerId.Replace("-", "/");
         cmd.CommandText = """
             SELECT id, rid, self_link, etag, ts, partition_key_json,
                    indexing_policy, default_ttl, pkrange_rid, current_lsn
-            FROM _containers WHERE id = @id OR rid = @id
+            FROM _containers WHERE id = @id OR rid = @id OR rid = @ridVariant
             """;
+        cmd.Parameters.AddWithValue("@ridVariant", ridVariant);
         cmd.Parameters.AddWithValue("@id", containerId);
 
         using var reader = cmd.ExecuteReader();
@@ -141,8 +145,10 @@ public class ContainerRepository
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM _containers WHERE id = @id OR rid = @id";
+        var ridVariant = containerId.Replace("-", "/");
+        cmd.CommandText = "SELECT 1 FROM _containers WHERE id = @id OR rid = @id OR rid = @rv";
         cmd.Parameters.AddWithValue("@id", containerId);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         return cmd.ExecuteScalar() is not null;
     }
 
@@ -150,8 +156,10 @@ public class ContainerRepository
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT pkrange_rid FROM _containers WHERE id = @id OR rid = @id";
+        var ridVariant = containerId.Replace("-", "/");
+        cmd.CommandText = "SELECT pkrange_rid FROM _containers WHERE id = @id OR rid = @id OR rid = @rv";
         cmd.Parameters.AddWithValue("@id", containerId);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         return cmd.ExecuteScalar() as string;
     }
 
@@ -159,8 +167,10 @@ public class ContainerRepository
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT rid FROM _containers WHERE id = @id OR rid = @id";
+        var ridVariant = containerId.Replace("-", "/");
+        cmd.CommandText = "SELECT rid FROM _containers WHERE id = @id OR rid = @id OR rid = @rv";
         cmd.Parameters.AddWithValue("@id", containerId);
+        cmd.Parameters.AddWithValue("@rv", ridVariant);
         return cmd.ExecuteScalar() as string;
     }
 

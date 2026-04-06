@@ -38,6 +38,9 @@ public static class PartitionKeyRangeEndpoints
         var ifNoneMatch = context.Request.Headers["If-None-Match"].FirstOrDefault();
         var isChangeFeed = context.Request.Headers["A-IM"].FirstOrDefault()?.Contains("Incremental") == true;
 
+        var logPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "pkranges-debug.log");
+        File.AppendAllText(logPath, $"[PKR] dbId={dbId} collId={collId} cf={isChangeFeed} inm={ifNoneMatch} status={(isChangeFeed && ifNoneMatch != null && ifNoneMatch != "*" ? "304" : "200")}\n");
+
         if (isChangeFeed && ifNoneMatch != null && ifNoneMatch != "*")
         {
             // Subsequent call — no new changes. Return new etag so SDK doesn't think cache is stale.
