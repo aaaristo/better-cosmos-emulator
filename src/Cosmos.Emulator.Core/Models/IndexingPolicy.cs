@@ -23,7 +23,7 @@ public class IndexingPolicy
     ];
 
     [JsonPropertyName("compositeIndexes")]
-    public List<List<CompositeIndex>>? CompositeIndexes { get; set; }
+    public List<List<CompositeIndex>> CompositeIndexes { get; set; } = [];
 }
 
 public class IncludedPath
