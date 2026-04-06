@@ -43,6 +43,7 @@ builder.Services.AddTransient<ContainerRepository>();
 builder.Services.AddTransient<DocumentRepository>();
 builder.Services.AddTransient<ChangeFeedRepository>();
 builder.Services.AddSingleton<CosmosSqlQueryEngine>();
+builder.Services.AddHostedService<Cosmos.Emulator.Api.Services.TtlExpirationService>();
 
 var app = builder.Build();
 

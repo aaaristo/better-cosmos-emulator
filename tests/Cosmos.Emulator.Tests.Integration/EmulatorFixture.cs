@@ -108,6 +108,7 @@ public class EmulatorFixture : IAsyncLifetime
         builder.Services.AddTransient<Storage.Repositories.DocumentRepository>();
         builder.Services.AddTransient<Storage.Repositories.ChangeFeedRepository>();
         builder.Services.AddSingleton<QueryEngine.CosmosSqlQueryEngine>();
+        builder.Services.AddHostedService<Api.Services.TtlExpirationService>();
 
         _app = builder.Build();
 
