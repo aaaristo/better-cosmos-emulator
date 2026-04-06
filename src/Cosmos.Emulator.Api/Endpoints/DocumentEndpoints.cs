@@ -14,6 +14,7 @@ public static class DocumentEndpoints
         app.MapGet("/dbs/{dbId}/colls/{collId}/docs", HandleDocumentList);
         app.MapGet("/dbs/{dbId}/colls/{collId}/docs/{docId}", GetDocument);
         app.MapPut("/dbs/{dbId}/colls/{collId}/docs/{docId}", ReplaceDocument);
+        app.MapPatch("/dbs/{dbId}/colls/{collId}/docs/{docId}", PatchDocument);
         app.MapDelete("/dbs/{dbId}/colls/{collId}/docs/{docId}", DeleteDocument);
     }
 
@@ -485,6 +486,178 @@ public static class DocumentEndpoints
 
         context.Response.Headers["etag"] = etag;
         return Results.Json(enrichedBody);
+    }
+
+    private static async Task<IResult> PatchDocument(
+        string dbId, string collId, string docId, HttpContext context,
+        DatabaseRepository dbRepo, ContainerRepository containerRepo, DocumentRepository docRepo)
+    {
+        if (!dbRepo.Exists(dbId))
+            return Results.Json(new { code = "NotFound", message = $"Database '{dbId}' not found." }, statusCode: 404);
+
+        var container = containerRepo.Get(dbId, collId);
+        if (container is null)
+            return Results.Json(new { code = "NotFound", message = $"Container '{collId}' not found." }, statusCode: 404);
+
+        var pkHeader = context.Request.Headers["x-ms-documentdb-partitionkey"].FirstOrDefault();
+        if (pkHeader is null)
+            return Results.Json(new { code = "BadRequest", message = "Missing x-ms-documentdb-partitionkey header." }, statusCode: 400);
+
+        var partitionKey = PartitionKeyExtractor.FromHeader(pkHeader);
+
+        var existing = docRepo.Get(dbId, collId, docId, partitionKey);
+        if (existing is null)
+            return Results.Json(new { code = "NotFound", message = $"Entity with the specified id does not exist in the system. id = {docId}" }, statusCode: 404);
+
+        // Check etag precondition
+        var ifMatch = context.Request.Headers["If-Match"].FirstOrDefault();
+        if (ifMatch is not null && ifMatch != existing.Etag)
+            return Results.Json(new { code = "PreconditionFailed", message = "The operation specified an eTag that is different from the version available at the server." }, statusCode: 412);
+
+        var patchBody = await ReadBody(context);
+
+        if (!patchBody.TryGetProperty("operations", out var operations) || operations.ValueKind != JsonValueKind.Array)
+            return Results.Json(new { code = "BadRequest", message = "Missing 'operations' array in patch body." }, statusCode: 400);
+
+        // Apply patch operations to the existing document body
+        var node = System.Text.Json.Nodes.JsonNode.Parse(existing.Body.GetRawText())!.AsObject();
+
+        foreach (var op in operations.EnumerateArray())
+        {
+            var opType = op.GetProperty("op").GetString()!.ToLowerInvariant();
+            var path = op.GetProperty("path").GetString()!;
+            var segments = path.TrimStart('/').Split('/');
+
+            switch (opType)
+            {
+                case "add":
+                case "set":
+                {
+                    var value = op.TryGetProperty("value", out var v)
+                        ? System.Text.Json.Nodes.JsonNode.Parse(v.GetRawText())
+                        : null;
+                    SetNestedValue(node, segments, value);
+                    break;
+                }
+                case "replace":
+                {
+                    var value = op.TryGetProperty("value", out var v)
+                        ? System.Text.Json.Nodes.JsonNode.Parse(v.GetRawText())
+                        : null;
+                    if (GetNestedValue(node, segments) is null)
+                        return Results.Json(new { code = "BadRequest", message = $"Path '{path}' does not exist for replace." }, statusCode: 400);
+                    SetNestedValue(node, segments, value);
+                    break;
+                }
+                case "remove":
+                {
+                    if (!RemoveNestedValue(node, segments))
+                        return Results.Json(new { code = "BadRequest", message = $"Path '{path}' does not exist for remove." }, statusCode: 400);
+                    break;
+                }
+                case "incr":
+                case "increment":
+                {
+                    var incrValue = op.GetProperty("value").GetDouble();
+                    var current = GetNestedValue(node, segments);
+                    double currentNum = 0;
+                    if (current is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<double>(out var d))
+                        currentNum = d;
+                    SetNestedValue(node, segments, System.Text.Json.Nodes.JsonValue.Create(currentNum + incrValue));
+                    break;
+                }
+                default:
+                    return Results.Json(new { code = "BadRequest", message = $"Unsupported patch operation: '{opType}'." }, statusCode: 400);
+            }
+        }
+
+        var etag = EtagGenerator.Generate();
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // Update system properties
+        node["_etag"] = etag;
+        node["_ts"] = ts;
+
+        var patchedBody = JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
+
+        var document = new CosmosDocument
+        {
+            Id = docId,
+            Rid = existing.Rid,
+            PartitionKey = partitionKey,
+            Body = patchedBody,
+            Etag = etag,
+            Ts = ts
+        };
+
+        docRepo.Replace(dbId, collId, document);
+
+        context.Response.Headers["etag"] = etag;
+        return Results.Json(patchedBody);
+    }
+
+    private static void SetNestedValue(System.Text.Json.Nodes.JsonObject root, string[] segments, System.Text.Json.Nodes.JsonNode? value)
+    {
+        var current = (System.Text.Json.Nodes.JsonNode)root;
+        for (int i = 0; i < segments.Length - 1; i++)
+        {
+            if (current is System.Text.Json.Nodes.JsonObject obj)
+            {
+                if (!obj.ContainsKey(segments[i]))
+                    obj[segments[i]] = new System.Text.Json.Nodes.JsonObject();
+                current = obj[segments[i]]!;
+            }
+            else if (current is System.Text.Json.Nodes.JsonArray arr && int.TryParse(segments[i], out var idx))
+            {
+                current = arr[idx]!;
+            }
+        }
+
+        var lastSegment = segments[^1];
+        if (current is System.Text.Json.Nodes.JsonObject parentObj)
+        {
+            parentObj[lastSegment] = value;
+        }
+        else if (current is System.Text.Json.Nodes.JsonArray parentArr)
+        {
+            if (lastSegment == "-")
+                parentArr.Add(value);
+            else if (int.TryParse(lastSegment, out var idx))
+                parentArr[idx] = value;
+        }
+    }
+
+    private static System.Text.Json.Nodes.JsonNode? GetNestedValue(System.Text.Json.Nodes.JsonObject root, string[] segments)
+    {
+        System.Text.Json.Nodes.JsonNode? current = root;
+        foreach (var segment in segments)
+        {
+            if (current is System.Text.Json.Nodes.JsonObject obj && obj.ContainsKey(segment))
+                current = obj[segment];
+            else if (current is System.Text.Json.Nodes.JsonArray arr && int.TryParse(segment, out var idx) && idx < arr.Count)
+                current = arr[idx];
+            else
+                return null;
+        }
+        return current;
+    }
+
+    private static bool RemoveNestedValue(System.Text.Json.Nodes.JsonObject root, string[] segments)
+    {
+        if (segments.Length == 1)
+            return root.Remove(segments[0]);
+
+        var parent = GetNestedValue(root, segments[..^1]);
+        var lastSegment = segments[^1];
+
+        if (parent is System.Text.Json.Nodes.JsonObject parentObj)
+            return parentObj.Remove(lastSegment);
+        if (parent is System.Text.Json.Nodes.JsonArray parentArr && int.TryParse(lastSegment, out var idx))
+        {
+            parentArr.RemoveAt(idx);
+            return true;
+        }
+        return false;
     }
 
     private static IResult DeleteDocument(
