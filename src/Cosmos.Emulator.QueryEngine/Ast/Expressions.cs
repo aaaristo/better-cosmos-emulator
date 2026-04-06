@@ -8,12 +8,15 @@ public record SelectStatement(
     bool IsValue,
     List<SelectItem> SelectItems,
     string FromAlias,
+    List<JoinClause>? Joins,
     Expression? Where,
     List<OrderByItem>? OrderBy,
     int? Offset,
     int? Limit,
     List<Expression>? GroupBy,
     Expression? Having) : Expression;
+
+public record JoinClause(string Alias, Expression InExpression);
 
 public record SelectItem(Expression Expr, string? Alias);
 

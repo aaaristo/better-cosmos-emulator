@@ -63,8 +63,16 @@ public class CosmosSqlParser
         Expect(TokenType.From);
         var fromAlias = Expect(TokenType.Identifier).Value;
 
-        // Optional JOIN (for intra-document array joins)
-        // TODO: support JOIN in a later phase
+        // Optional JOIN clauses: JOIN t IN c.tags
+        List<JoinClause>? joins = null;
+        while (Match(TokenType.Join))
+        {
+            joins ??= new List<JoinClause>();
+            var joinAlias = Expect(TokenType.Identifier).Value;
+            Expect(TokenType.In);
+            var inExpr = ParsePostfix();
+            joins.Add(new JoinClause(joinAlias, inExpr));
+        }
 
         Expression? where = null;
         if (Match(TokenType.Where))
@@ -114,7 +122,7 @@ public class CosmosSqlParser
             });
         }
 
-        return new SelectStatement(isDistinct, top, isValue, selectItems, fromAlias, where, orderBy, offset, limit, groupBy, having);
+        return new SelectStatement(isDistinct, top, isValue, selectItems, fromAlias, joins, where, orderBy, offset, limit, groupBy, having);
     }
 
     private List<SelectItem> ParseSelectList()

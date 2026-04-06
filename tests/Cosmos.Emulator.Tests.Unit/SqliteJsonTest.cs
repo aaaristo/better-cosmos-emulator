@@ -57,5 +57,25 @@ public class SqliteJsonTest
 
         // Should still embed properly, not stringify
         Assert.Contains("\"payload\":{\"_etag\"", withEtag);
+
+        // Test json_each + json_extract for object arrays (JOIN support)
+        cmd.CommandText = """
+            CREATE TABLE docs (body TEXT);
+            INSERT INTO docs VALUES ('{"name":"Alice","sizes":[{"key":"s","desc":"Small"},{"key":"l","desc":"Large"}]}');
+        """;
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = """
+            SELECT json_extract(body, '$.name'), json_extract(j.value, '$.key'), json_extract(j.value, '$.desc')
+            FROM docs CROSS JOIN json_each(json_extract(body, '$.sizes')) AS j
+        """;
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetString(0)},{reader.GetString(1)},{reader.GetString(2)}");
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal("Alice,s,Small", rows[0]);
+        Assert.Equal("Alice,l,Large", rows[1]);
     }
 }

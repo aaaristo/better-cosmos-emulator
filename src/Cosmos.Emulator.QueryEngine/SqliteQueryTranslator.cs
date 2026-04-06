@@ -17,6 +17,7 @@ public class SqliteQueryTranslator
     private readonly string _fromAlias;
     private readonly HashSet<string> _knownColumns;
     private readonly Dictionary<string, object> _parameters = new();
+    private readonly Dictionary<string, int> _joinAliases = new(StringComparer.OrdinalIgnoreCase);
     private int _paramCounter;
 
     public SqliteQueryTranslator(string containerName, string fromAlias, HashSet<string> knownColumns)
@@ -32,6 +33,13 @@ public class SqliteQueryTranslator
         {
             foreach (var (k, v) in userParams)
                 _parameters[k] = v;
+        }
+
+        // Pre-register JOIN aliases so they're available during SELECT translation
+        if (stmt.Joins is not null)
+        {
+            for (int i = 0; i < stmt.Joins.Count; i++)
+                _joinAliases[stmt.Joins[i].Alias] = i;
         }
 
         var sb = new StringBuilder();
@@ -72,6 +80,19 @@ public class SqliteQueryTranslator
 
         // FROM clause
         sb.Append($" FROM [{_containerName.Replace("]", "]]")}]");
+
+        // JOIN clauses → CROSS JOIN json_each(...)
+        if (stmt.Joins is not null)
+        {
+            for (int i = 0; i < stmt.Joins.Count; i++)
+            {
+                var join = stmt.Joins[i];
+                _joinAliases[join.Alias] = i;
+                var arrayExpr = TranslateExpression(join.InExpression);
+                var tableAlias = $"__j{i}";
+                sb.Append($" CROSS JOIN json_each({arrayExpr}) AS {tableAlias}");
+            }
+        }
 
         // WHERE clause (always exclude deleted + add user conditions)
         sb.Append(" WHERE is_deleted = 0");
@@ -158,6 +179,26 @@ public class SqliteQueryTranslator
 
     private string TranslatePropertyAccess(PropertyAccess pa)
     {
+        // Check if the first path segment is a JOIN alias (e.g., "t" in "t.name" from JOIN t IN c.tags)
+        var firstSegment = pa.Path.Count > 0 ? pa.Path[0] : pa.Source;
+        if (firstSegment is not null && _joinAliases.TryGetValue(firstSegment, out var joinIdx))
+        {
+            var tableAlias = $"__j{joinIdx}";
+            var remaining = pa.Path.Count > 0 && pa.Path[0].Equals(firstSegment, StringComparison.OrdinalIgnoreCase)
+                ? pa.Path.Skip(1).ToList()
+                : pa.Path;
+
+            if (remaining.Count == 0)
+            {
+                // Just the join alias → the element value (could be scalar or object)
+                return $"{tableAlias}.value";
+            }
+
+            // Nested property on joined element: t.name → json_extract(__j0.value, '$.name')
+            var joinJsonPath = "$." + string.Join(".", remaining.Select(EscapeJsonPath));
+            return $"json_extract({tableAlias}.value, '{joinJsonPath}')";
+        }
+
         // Strip the FROM alias if present (e.g., "c" in "c.name" → just "name")
         var path = pa.Path;
         if (pa.Source is not null && pa.Source.Equals(_fromAlias, StringComparison.OrdinalIgnoreCase))
