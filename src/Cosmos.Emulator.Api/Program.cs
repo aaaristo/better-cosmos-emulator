@@ -7,7 +7,16 @@ using Cosmos.Emulator.QueryEngine;
 using Cosmos.Emulator.Storage;
 using Cosmos.Emulator.Storage.Repositories;
 
+// Support --data, --port, --key as simple CLI aliases
+var switchMappings = new Dictionary<string, string>
+{
+    ["--data"] = "CosmosEmulator:DataPath",
+    ["--port"] = "CosmosEmulator:Port",
+    ["--key"] = "CosmosEmulator:MasterKey",
+};
+
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddCommandLine(args, switchMappings);
 
 var config = builder.Configuration;
 var masterKey = config.GetValue<string>("CosmosEmulator:MasterKey")

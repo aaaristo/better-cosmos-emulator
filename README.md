@@ -17,6 +17,19 @@ The official Cosmos DB emulator is heavy, Windows-only (Linux Docker image is li
 dotnet run --project src/Cosmos.Emulator.Api
 ```
 
+With custom data directory and port:
+
+```bash
+dotnet run --project src/Cosmos.Emulator.Api -- --data /path/to/data --port 9999
+```
+
+### Docker
+
+```bash
+docker build -t better-cosmos-emulator .
+docker run -p 8081:8081 -v cosmos-data:/data better-cosmos-emulator
+```
+
 Connect with the standard emulator connection string:
 
 ```csharp
