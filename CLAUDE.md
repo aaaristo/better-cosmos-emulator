@@ -51,6 +51,7 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 - Coalesce (??) operator
 - JSON object literals: `SELECT {"name": c.name, "age": c.age} FROM c`
 - JSON array literals: `SELECT [c.name, c.age] FROM c`
+- JOIN (intra-document arrays): `SELECT t FROM c JOIN t IN c.tags`
 - Parameterized queries (@param)
 - Cross-partition queries
 
@@ -136,7 +137,7 @@ tests/
 
 ## Current Test Status
 
-66 integration tests + 1 unit test. 0 skipped.
+71 integration tests + 1 unit test. 0 skipped.
 
 ## Debugging Failing Tests
 
@@ -172,7 +173,6 @@ tests/
 ## Not Yet Implemented
 
 - TTL document expiration
-- JOIN (intra-document array joins)
 - Indexing policy enforcement (reject queries on excluded paths)
 - HMAC-SHA256 auth validation
 - Pagination (x-ms-continuation) for list endpoints
