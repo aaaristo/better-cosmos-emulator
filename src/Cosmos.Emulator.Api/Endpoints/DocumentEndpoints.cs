@@ -207,15 +207,32 @@ public static class DocumentEndpoints
                 }
             }
 
-            // Apply max item count as LIMIT if not already present
+            // Apply max item count as LIMIT and handle continuation (offset)
             var maxItems = 100;
             if (context.Request.Headers.TryGetValue("x-ms-max-item-count", out var maxItemsHeader))
             {
-                int.TryParse(maxItemsHeader.FirstOrDefault(), out maxItems);
+                if (int.TryParse(maxItemsHeader.FirstOrDefault(), out var parsed) && parsed > 0)
+                    maxItems = parsed;
             }
+
+            var queryOffset = 0;
+            var queryContinuation = context.Request.Headers["x-ms-continuation"].FirstOrDefault();
+            if (queryContinuation is not null)
+            {
+                try
+                {
+                    var tokenBytes = Convert.FromBase64String(queryContinuation);
+                    var tokenJson = JsonDocument.Parse(tokenBytes);
+                    queryOffset = tokenJson.RootElement.GetProperty("offset").GetInt32();
+                }
+                catch { }
+            }
+
             if (!isRawSql && !sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
             {
                 sql += $" LIMIT {maxItems}";
+                if (queryOffset > 0)
+                    sql += $" OFFSET {queryOffset}";
             }
 
             var results = docRepo.ExecuteQuery(dbId, collId, sql, parameters);
@@ -225,6 +242,14 @@ public static class DocumentEndpoints
                 results = WrapOrderByResults(results, orderByFields);
 
             context.Response.Headers["x-ms-item-count"] = results.Count.ToString();
+
+            // Set continuation if we got a full page
+            if (results.Count == maxItems)
+            {
+                var nextToken = Convert.ToBase64String(
+                    JsonSerializer.SerializeToUtf8Bytes(new { offset = queryOffset + maxItems }));
+                context.Response.Headers["x-ms-continuation"] = nextToken;
+            }
 
             return Results.Json(new
             {

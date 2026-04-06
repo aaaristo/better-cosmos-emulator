@@ -83,13 +83,13 @@ public static class ContainerEndpoints
         return Results.Json(container, statusCode: 201);
     }
 
-    private static IResult ListContainers(string dbId,
+    private static IResult ListContainers(string dbId, HttpContext context,
         DatabaseRepository dbRepo, ContainerRepository containerRepo)
     {
         if (!dbRepo.Exists(dbId))
             return Results.Json(new { code = "NotFound", message = $"Database '{dbId}' not found." }, statusCode: 404);
 
-        var containers = containerRepo.List(dbId);
+        var containers = PaginationHelper.Apply(context, containerRepo.List(dbId));
         return Results.Json(new
         {
             _rid = dbRepo.Get(dbId)!.Rid,

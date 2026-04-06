@@ -42,9 +42,9 @@ public static class DatabaseEndpoints
         return Results.Json(database, statusCode: 201);
     }
 
-    private static IResult ListDatabases(DatabaseRepository repo)
+    private static IResult ListDatabases(HttpContext context, DatabaseRepository repo)
     {
-        var databases = repo.List();
+        var databases = PaginationHelper.Apply(context, repo.List());
         return Results.Json(new
         {
             _rid = "",
