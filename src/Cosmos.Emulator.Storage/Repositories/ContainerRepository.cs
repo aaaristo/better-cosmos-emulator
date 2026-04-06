@@ -85,6 +85,12 @@ public class ContainerRepository
         cmd.ExecuteNonQuery();
 
         Schema.SchemaInitializer.CreateContainerTables(conn, container.Id);
+
+        // Pre-create columns and indexes from indexing policy
+        Schema.SchemaInitializer.EnsureColumnsFromPolicy(conn, container.Id, container.IndexingPolicy);
+        var existingCols = Schema.SchemaInitializer.GetExistingColumns(conn, container.Id);
+        Schema.SchemaInitializer.SyncCompositeIndexes(conn, container.Id,
+            container.IndexingPolicy.CompositeIndexes, existingCols);
     }
 
     public void Replace(string databaseId, CosmosContainer container)
@@ -107,6 +113,14 @@ public class ContainerRepository
         cmd.Parameters.AddWithValue("@idx_policy", JsonSerializer.Serialize(container.IndexingPolicy));
         cmd.Parameters.AddWithValue("@default_ttl", container.DefaultTtl.HasValue ? container.DefaultTtl.Value : DBNull.Value);
         cmd.ExecuteNonQuery();
+
+        // Pre-create columns and recreate composite indexes from updated policy
+        Schema.SchemaInitializer.EnsureColumnsFromPolicy(conn, container.Id, container.IndexingPolicy);
+        var existingCols = Schema.SchemaInitializer.GetExistingColumns(conn, container.Id);
+        Schema.SchemaInitializer.SyncCompositeIndexes(conn, container.Id,
+            container.IndexingPolicy.CompositeIndexes, existingCols);
+
+        DocumentRepository.InvalidateColumnCache(databaseId, container.Id);
     }
 
     public void Delete(string databaseId, string containerId)

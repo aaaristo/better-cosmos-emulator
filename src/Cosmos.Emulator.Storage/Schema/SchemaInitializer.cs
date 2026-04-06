@@ -124,5 +124,110 @@ public static class SchemaInitializer
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Creates SQLite composite indexes based on the container's indexing policy.
+    /// Drops existing composite indexes first, then recreates from the policy.
+    /// Composite index on [/Repo, /Path, /Deleted] becomes a SQLite index on [Repo, Path, Deleted].
+    /// Nested paths like /address/city map to column [address__city].
+    /// </summary>
+    public static void SyncCompositeIndexes(
+        SqliteConnection connection, string containerName,
+        List<List<Core.Models.CompositeIndex>> compositeIndexes,
+        HashSet<string> existingColumns)
+    {
+        // Drop all existing composite indexes for this container
+        using (var listCmd = connection.CreateCommand())
+        {
+            listCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=@tbl AND name LIKE '%__cix_%'";
+            listCmd.Parameters.AddWithValue("@tbl", containerName);
+            using var reader = listCmd.ExecuteReader();
+            var toDrop = new List<string>();
+            while (reader.Read())
+                toDrop.Add(reader.GetString(0));
+            foreach (var idx in toDrop)
+            {
+                using var dropCmd = connection.CreateCommand();
+                dropCmd.CommandText = $"DROP INDEX IF EXISTS {QuoteName(idx)}";
+                dropCmd.ExecuteNonQuery();
+            }
+        }
+
+        // Create new composite indexes
+        for (int i = 0; i < compositeIndexes.Count; i++)
+        {
+            var composite = compositeIndexes[i];
+            var columnNames = new List<string>();
+            var allColumnsExist = true;
+
+            foreach (var path in composite)
+            {
+                // /Repo -> Repo, /address/city -> address__city
+                var colName = path.Path.TrimStart('/').Replace("/", "__");
+                if (!existingColumns.Contains(colName))
+                {
+                    allColumnsExist = false;
+                    break;
+                }
+                var order = path.Order.Equals("descending", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
+                columnNames.Add($"{QuoteName(colName)} {order}");
+            }
+
+            if (!allColumnsExist || columnNames.Count == 0)
+                continue; // Skip — columns don't exist yet, index will be created when data arrives
+
+            var idxName = QuoteName($"{containerName}__cix_{i}");
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $"CREATE INDEX IF NOT EXISTS {idxName} ON {QuoteName(containerName)}({string.Join(", ", columnNames)})";
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Creates a single-column SQLite index.
+    /// </summary>
+    public static void CreateColumnIndex(SqliteConnection connection, string containerName, string columnName)
+    {
+        var idxName = QuoteName($"{containerName}__ix_{columnName}");
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"CREATE INDEX IF NOT EXISTS {idxName} ON {QuoteName(containerName)}({QuoteName(columnName)})";
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Pre-creates columns and single-column indexes for all paths referenced in the
+    /// indexing policy (composite indexes). This ensures columns and indexes exist
+    /// before any documents are inserted.
+    /// </summary>
+    public static void EnsureColumnsFromPolicy(
+        SqliteConnection connection, string containerName,
+        Core.Models.IndexingPolicy policy)
+    {
+        var existingColumns = GetExistingColumns(connection, containerName);
+
+        // Collect all paths that need columns from composite indexes
+        // /Repo -> Repo, /address/city -> address__city
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var composite in policy.CompositeIndexes)
+        {
+            foreach (var ci in composite)
+            {
+                var col = ci.Path.TrimStart('/').Replace("/", "__");
+                if (!string.IsNullOrEmpty(col) && col != "*")
+                    paths.Add(col);
+            }
+        }
+
+        // Create any missing columns and single-column indexes
+        foreach (var col in paths)
+        {
+            if (!existingColumns.Contains(col))
+            {
+                AddColumn(connection, containerName, col, "TEXT");
+                existingColumns.Add(col);
+            }
+            CreateColumnIndex(connection, containerName, col);
+        }
+    }
+
     public static string QuoteName(string name) => $"[{name.Replace("]", "]]")}]";
 }

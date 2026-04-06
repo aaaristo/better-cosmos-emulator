@@ -73,6 +73,7 @@ public class EmulatorFixture : IAsyncLifetime
 {
     private WebApplication? _app;
     public CosmosClient Client { get; private set; } = null!;
+    public Storage.SqliteStorageProvider Storage { get; private set; } = null!;
 
     private const string MasterKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
     private string _dataPath = null!;
@@ -99,6 +100,7 @@ public class EmulatorFixture : IAsyncLifetime
         });
 
         var storage = new Storage.SqliteStorageProvider(_dataPath);
+        Storage = storage;
         builder.Services.AddSingleton(storage);
         builder.Services.AddSingleton(new Core.Auth.HmacSignatureValidator(MasterKey));
         builder.Services.AddTransient<Storage.Repositories.DatabaseRepository>();
