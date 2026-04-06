@@ -30,9 +30,18 @@ public static class DocumentEndpoints
         if (container is null)
             return Results.Json(new { code = "NotFound", message = $"Container '{collId}' not found." }, statusCode: 404);
 
+        // Query plan request: the SDK asks "how should I execute this query?"
+        // We return a simple plan telling the SDK to execute it as a single-partition passthrough.
+        var isQueryPlanRequest = context.Request.Headers["x-ms-cosmos-is-query-plan-request"]
+            .FirstOrDefault()?.Equals("True", StringComparison.OrdinalIgnoreCase) == true;
+        if (isQueryPlanRequest)
+        {
+            return await HandleQueryPlanRequest(context, container);
+        }
+
         var contentType = context.Request.ContentType ?? "";
         var isQuery = contentType.Contains("application/query+json", StringComparison.OrdinalIgnoreCase)
-                      && context.Request.Headers["x-ms-documentdb-isquery"].FirstOrDefault()?.Equals("True", StringComparison.OrdinalIgnoreCase) == true;
+                      || context.Request.Headers["x-ms-documentdb-isquery"].FirstOrDefault()?.Equals("True", StringComparison.OrdinalIgnoreCase) == true;
 
         if (isQuery)
         {
@@ -895,6 +904,62 @@ public static class DocumentEndpoints
         return wrapped;
     }
     */
+
+    /// <summary>
+    /// Handles query plan requests (x-ms-cosmos-is-query-plan-request: True).
+    /// The SDK sends these before executing queries to determine the execution strategy.
+    /// We return a plan that tells the SDK to execute as a passthrough single-partition query.
+    /// </summary>
+    private static async Task<IResult> HandleQueryPlanRequest(HttpContext context, CosmosContainer container)
+    {
+        var body = await ReadBody(context);
+        var queryText = body.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+
+        // Determine if the query has ORDER BY, GROUP BY, aggregates, DISTINCT, TOP, OFFSET
+        var upperQuery = queryText.ToUpperInvariant();
+        var hasOrderBy = upperQuery.Contains("ORDER BY");
+        var hasGroupBy = upperQuery.Contains("GROUP BY");
+        var hasAggregate = upperQuery.Contains("COUNT(") || upperQuery.Contains("SUM(")
+                        || upperQuery.Contains("AVG(") || upperQuery.Contains("MIN(") || upperQuery.Contains("MAX(");
+        var hasDistinct = upperQuery.Contains("DISTINCT");
+        var hasTop = upperQuery.Contains("TOP ");
+        var hasOffset = upperQuery.Contains("OFFSET");
+
+        // Build the query plan response
+        var queryInfo = new Dictionary<string, object?>
+        {
+            ["distinctType"] = hasDistinct ? "Ordered" : "None",
+            ["top"] = null,
+            ["offset"] = null,
+            ["limit"] = null,
+            ["orderBy"] = hasOrderBy ? new[] { "Ascending" } : Array.Empty<string>(),
+            ["orderByExpressions"] = hasOrderBy ? new[] { queryText } : Array.Empty<string>(),
+            ["groupByExpressions"] = Array.Empty<string>(),
+            ["groupByAliases"] = Array.Empty<string>(),
+            ["aggregates"] = hasAggregate ? new[] { "Count" } : Array.Empty<string>(),
+            ["groupByAliasToAggregateType"] = new Dictionary<string, string>(),
+            ["rewrittenQuery"] = queryText,
+            ["hasSelectValue"] = upperQuery.Contains("SELECT VALUE"),
+        };
+
+        var plan = new Dictionary<string, object>
+        {
+            ["partitionedQueryExecutionInfoVersion"] = 2,
+            ["queryInfo"] = queryInfo,
+            ["queryRanges"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["min"] = "",
+                    ["max"] = "FF",
+                    ["isMinInclusive"] = true,
+                    ["isMaxInclusive"] = false
+                }
+            }
+        };
+
+        return Results.Json(plan);
+    }
 
     private static async Task<JsonElement> ReadBody(HttpContext context)
     {
