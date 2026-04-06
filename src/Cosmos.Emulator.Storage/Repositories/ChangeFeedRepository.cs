@@ -1,0 +1,120 @@
+using System.Text.Json;
+using Cosmos.Emulator.Core.Models;
+using Microsoft.Data.Sqlite;
+
+namespace Cosmos.Emulator.Storage.Repositories;
+
+public class ChangeFeedRepository
+{
+    private readonly SqliteStorageProvider _storage;
+
+    public ChangeFeedRepository(SqliteStorageProvider storage)
+    {
+        _storage = storage;
+    }
+
+    /// <summary>
+    /// LatestVersion: reads current state of documents changed after the given LSN.
+    /// </summary>
+    public List<CosmosDocument> ReadLatestVersion(
+        string databaseId, string containerId,
+        string? partitionKey, long afterLsn, int maxItems)
+    {
+        using var conn = _storage.GetDatabaseConnection(databaseId);
+        var table = QuoteName(containerId);
+
+        using var cmd = conn.CreateCommand();
+        var where = "lsn > @lsn AND is_deleted = 0";
+        if (partitionKey is not null)
+        {
+            where += " AND partition_key = @pk";
+            cmd.Parameters.AddWithValue("@pk", partitionKey);
+        }
+
+        cmd.CommandText = $"""
+            SELECT id, rid, partition_key, body, etag, ts, is_deleted, lsn
+            FROM {table}
+            WHERE {where}
+            ORDER BY lsn
+            LIMIT @limit
+            """;
+        cmd.Parameters.AddWithValue("@lsn", afterLsn);
+        cmd.Parameters.AddWithValue("@limit", maxItems);
+
+        var result = new List<CosmosDocument>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(new CosmosDocument
+            {
+                Id = reader.GetString(0),
+                Rid = reader.GetString(1),
+                PartitionKey = reader.GetString(2),
+                Body = JsonDocument.Parse(reader.GetString(3)).RootElement.Clone(),
+                Etag = reader.GetString(4),
+                Ts = reader.GetInt64(5),
+                IsDeleted = reader.GetInt32(6) != 0,
+                Lsn = reader.GetInt64(7)
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// AllVersionsAndDeletes: reads change feed log entries after the given LSN.
+    /// </summary>
+    public List<ChangeFeedEntry> ReadAllVersionsAndDeletes(
+        string databaseId, string containerId,
+        string? partitionKey, long afterLsn, int maxItems)
+    {
+        using var conn = _storage.GetDatabaseConnection(databaseId);
+        var cfTable = QuoteName(containerId + "__cf");
+
+        using var cmd = conn.CreateCommand();
+        var where = "lsn > @lsn";
+        if (partitionKey is not null)
+        {
+            where += " AND partition_key = @pk";
+            cmd.Parameters.AddWithValue("@pk", partitionKey);
+        }
+
+        cmd.CommandText = $"""
+            SELECT lsn, document_id, partition_key, operation, body, previous_body, ts, etag
+            FROM {cfTable}
+            WHERE {where}
+            ORDER BY lsn
+            LIMIT @limit
+            """;
+        cmd.Parameters.AddWithValue("@lsn", afterLsn);
+        cmd.Parameters.AddWithValue("@limit", maxItems);
+
+        var result = new List<ChangeFeedEntry>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(new ChangeFeedEntry
+            {
+                Lsn = reader.GetInt64(0),
+                DocumentId = reader.GetString(1),
+                PartitionKey = reader.GetString(2),
+                Operation = reader.GetString(3),
+                Body = reader.IsDBNull(4) ? null : JsonDocument.Parse(reader.GetString(4)).RootElement.Clone(),
+                PreviousBody = reader.IsDBNull(5) ? null : JsonDocument.Parse(reader.GetString(5)).RootElement.Clone(),
+                Ts = reader.GetInt64(6),
+                Etag = reader.GetString(7)
+            });
+        }
+        return result;
+    }
+
+    public long GetCurrentLsn(string databaseId, string containerId)
+    {
+        using var conn = _storage.GetDatabaseConnection(databaseId);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT current_lsn FROM _containers WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", containerId);
+        return (long)(cmd.ExecuteScalar() ?? 0L);
+    }
+
+    private static string QuoteName(string name) => $"[{name.Replace("]", "]]")}]";
+}

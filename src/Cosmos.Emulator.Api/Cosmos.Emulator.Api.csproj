@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Cosmos.Emulator.Core\Cosmos.Emulator.Core.csproj" />
+    <ProjectReference Include="..\Cosmos.Emulator.Storage\Cosmos.Emulator.Storage.csproj" />
+    <ProjectReference Include="..\Cosmos.Emulator.QueryEngine\Cosmos.Emulator.QueryEngine.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

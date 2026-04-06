@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Cosmos.Emulator.Api/Cosmos.Emulator.Api.csproj" />
+    <Project Path="src/Cosmos.Emulator.Core/Cosmos.Emulator.Core.csproj" />
+    <Project Path="src/Cosmos.Emulator.QueryEngine/Cosmos.Emulator.QueryEngine.csproj" />
+    <Project Path="src/Cosmos.Emulator.Storage/Cosmos.Emulator.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cosmos.Emulator.Tests.Integration/Cosmos.Emulator.Tests.Integration.csproj" />
+    <Project Path="tests/Cosmos.Emulator.Tests.Unit/Cosmos.Emulator.Tests.Unit.csproj" />
+  </Folder>
+</Solution>
