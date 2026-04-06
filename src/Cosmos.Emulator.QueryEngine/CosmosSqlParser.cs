@@ -63,6 +63,22 @@ public class CosmosSqlParser
         Expect(TokenType.From);
         var fromAlias = Expect(TokenType.Identifier).Value;
 
+        // Handle "FROM root c", "FROM root AS c", or just "FROM c"
+        // In Cosmos SQL, "root" is a keyword meaning the container.
+        if (fromAlias.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Match(TokenType.As))
+                fromAlias = Expect(TokenType.Identifier).Value;
+            else if (Current.Type == TokenType.Identifier)
+                fromAlias = Expect(TokenType.Identifier).Value;
+            // else: "FROM root" alone — "root" IS the alias
+        }
+        else if (Match(TokenType.As))
+        {
+            // "FROM someAlias AS anotherAlias" — unusual but handle it
+            fromAlias = Expect(TokenType.Identifier).Value;
+        }
+
         // Optional JOIN clauses: JOIN t IN c.tags
         List<JoinClause>? joins = null;
         while (Match(TokenType.Join))

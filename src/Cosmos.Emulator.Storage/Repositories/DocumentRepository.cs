@@ -18,6 +18,13 @@ public class DocumentRepository
         "id", "_rid", "_self", "_etag", "_ts", "_attachments"
     };
 
+    // SQLite system columns — user properties matching these (case-insensitive) must not
+    // become dynamic columns because SQLite column names are case-insensitive.
+    private static readonly HashSet<string> SystemSqliteColumns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "id", "rid", "partition_key", "body", "etag", "ts", "is_deleted", "lsn"
+    };
+
     public DocumentRepository(SqliteStorageProvider storage)
     {
         _storage = storage;
@@ -354,6 +361,11 @@ public class DocumentRepository
                 continue;
 
             var colName = prefix.Length > 0 ? $"{prefix}__{prop.Name}" : prop.Name;
+
+            // Skip properties that collide with SQLite system columns (case-insensitive).
+            // e.g., user property "ETag" collides with system column "etag".
+            if (prefix.Length == 0 && SystemSqliteColumns.Contains(colName))
+                continue;
 
             switch (prop.Value.ValueKind)
             {

@@ -152,6 +152,43 @@ public class DocumentTests
         ex.StatusCode.ShouldBe(HttpStatusCode.PreconditionFailed);
     }
 
+    [Fact]
+    public async Task UpsertItem_WithETagProperty_ShouldNotThrow()
+    {
+        // Regression: documents with a user property "ETag" (PascalCase) caused
+        // "duplicate column name: ETag" because it collided case-insensitively
+        // with the system "etag" column in SQLite.
+        var container = await CreateTempContainer();
+
+        var item = new
+        {
+            id = "lease-1",
+            partitionKey = "pk1",
+            ETag = "some-etag-value",
+            Owner = "host-1"
+        };
+
+        // Should not throw "duplicate column name: ETag"
+        var response = await container.UpsertItemAsync(item, new PartitionKey("pk1"));
+        response.StatusCode.ShouldBe(HttpStatusCode.Created);
+
+        // Upsert again to exercise the replace path
+        var updated = new
+        {
+            id = "lease-1",
+            partitionKey = "pk1",
+            ETag = "updated-etag-value",
+            Owner = "host-2"
+        };
+        var response2 = await container.UpsertItemAsync(updated, new PartitionKey("pk1"));
+        response2.StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        // Read back and verify the user ETag property is preserved in the body
+        var read = await container.ReadItemAsync<dynamic>("lease-1", new PartitionKey("pk1"));
+        string etagValue = read.Resource.ETag?.ToString();
+        etagValue.ShouldBe("updated-etag-value");
+    }
+
     private async Task<Container> CreateTempContainer()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";

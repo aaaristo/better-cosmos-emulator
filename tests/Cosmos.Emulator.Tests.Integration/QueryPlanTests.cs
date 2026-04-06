@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Azure.Cosmos;
 using Shouldly;
 
 namespace Cosmos.Emulator.Tests.Integration;
@@ -110,5 +111,45 @@ public class QueryPlanTests
 
         var body = await response.Content.ReadAsStringAsync();
         body.ShouldNotContain("Missing 'id' property");
+    }
+
+    [Fact]
+    public async Task OrderByWithValueAndOffset_ShouldNotThrowCosmosElementError()
+    {
+        // Regression: SELECT VALUE c ... ORDER BY ... OFFSET ... LIMIT via older SDK
+        // caused "cosmosElement must not be an object" because the query plan told the SDK
+        // about ORDER BY, triggering the StreamingOrderByCrossPartitionQueryPipelineStage
+        // which expects {_rid, orderByItems, payload} format.
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _fixture.Client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"qp3-{Guid.NewGuid():N}"[..20], "/partitionKey")).Container;
+
+        // Insert test data with a "Deleted" field (simulates the production SyncObjects)
+        for (int i = 0; i < 3; i++)
+        {
+            await container.CreateItemAsync(new
+            {
+                id = $"item-{i}",
+                partitionKey = "pk1",
+                Deleted = 1000 + i,
+                Name = $"Item {i}"
+            }, new PartitionKey("pk1"));
+        }
+
+        // This is the exact query pattern that was failing
+        var query = new QueryDefinition(
+            "SELECT VALUE c FROM root c WHERE (c[\"Deleted\"] < @cutoffTimestamp) ORDER BY c[\"Deleted\"] OFFSET 0 LIMIT @p")
+            .WithParameter("@cutoffTimestamp", 9999)
+            .WithParameter("@p", 10);
+
+        var results = new List<dynamic>();
+        using var iterator = container.GetItemQueryIterator<dynamic>(query);
+        while (iterator.HasMoreResults)
+        {
+            var page = await iterator.ReadNextAsync();
+            results.AddRange(page);
+        }
+
+        results.Count.ShouldBe(3);
     }
 }

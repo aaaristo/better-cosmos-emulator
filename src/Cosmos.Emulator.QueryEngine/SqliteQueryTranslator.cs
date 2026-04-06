@@ -20,6 +20,16 @@ public class SqliteQueryTranslator
     private readonly Dictionary<string, int> _joinAliases = new(StringComparer.OrdinalIgnoreCase);
     private int _paramCounter;
 
+    // Cosmos system properties (_rid, _etag, _ts) map to SQLite columns without underscore prefix
+    private static readonly Dictionary<string, string> SystemPropertyToColumn = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["_rid"] = "rid",
+        ["_etag"] = "etag",
+        ["_ts"] = "ts",
+        ["_self"] = null!, // stays in body JSON
+        ["_attachments"] = null!, // stays in body JSON
+    };
+
     public SqliteQueryTranslator(string containerName, string fromAlias, HashSet<string> knownColumns)
     {
         _containerName = containerName;
@@ -216,6 +226,14 @@ public class SqliteQueryTranslator
             return "body";
         }
 
+        // Map Cosmos system properties to SQLite column names: _rid → rid, _etag → etag, _ts → ts
+        if (path.Count == 1 && SystemPropertyToColumn.TryGetValue(path[0], out var sqliteCol))
+        {
+            if (sqliteCol is not null)
+                return $"[{sqliteCol}]";
+            // null means stays in body JSON — fall through to json_extract
+        }
+
         // Flatten dotted path with __ separator: address.city → address__city
         var columnName = string.Join("__", path);
 
@@ -230,10 +248,28 @@ public class SqliteQueryTranslator
 
     private string TranslateArrayIndex(ArrayIndexAccess aia)
     {
-        // c.tags[0] → json_extract(body, '$.tags[0]')
-        if (aia.Array is PropertyAccess pa && aia.Index is LiteralExpression { Type: LiteralType.Number } idx)
+        // c["Deleted"] → treat as property access c.Deleted (bracket notation for property access)
+        // EF Core Cosmos provider uses this syntax: c["PropertyName"]
+        // Double-quoted identifiers are tokenized as Identifier → parsed as PropertyAccess
+        if (aia.Array is PropertyAccess pa)
         {
-            var path = GetPropertyPath(pa);
+            string? propName = null;
+            if (aia.Index is LiteralExpression { Type: LiteralType.String } strIdx)
+                propName = strIdx.Value?.ToString();
+            else if (aia.Index is PropertyAccess indexPa && indexPa.Source is null && indexPa.Path.Count == 1)
+                propName = indexPa.Path[0]; // double-quoted identifier like c["Deleted"]
+
+            if (propName is not null)
+            {
+                var syntheticPa = new PropertyAccess(pa.Source, [.. pa.Path, propName]);
+                return TranslatePropertyAccess(syntheticPa);
+            }
+        }
+
+        // c.tags[0] → json_extract(body, '$.tags[0]')
+        if (aia.Array is PropertyAccess pa2 && aia.Index is LiteralExpression { Type: LiteralType.Number } idx)
+        {
+            var path = GetPropertyPath(pa2);
             return $"json_extract(body, '$.{path}[{idx.Value}]')";
         }
 

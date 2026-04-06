@@ -121,7 +121,14 @@ public static class SchemaInitializer
     {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $"ALTER TABLE {QuoteName(containerName)} ADD COLUMN {QuoteName(columnName)} {sqliteType}";
-        cmd.ExecuteNonQuery();
+        try
+        {
+            cmd.ExecuteNonQuery();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1 && ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+        {
+            // Column already exists (case-insensitive match) — safe to ignore
+        }
     }
 
     /// <summary>
