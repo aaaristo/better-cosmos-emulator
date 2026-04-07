@@ -13,6 +13,7 @@ var switchMappings = new Dictionary<string, string>
     ["--data"] = "CosmosEmulator:DataPath",
     ["--port"] = "CosmosEmulator:Port",
     ["--key"] = "CosmosEmulator:MasterKey",
+    ["--inmemory"] = "CosmosEmulator:InMemory",
 };
 
 var builder = WebApplication.CreateBuilder(args);
@@ -24,6 +25,7 @@ var masterKey = config.GetValue<string>("CosmosEmulator:MasterKey")
 var dataPath = config.GetValue<string>("CosmosEmulator:DataPath")
     ?? Path.Combine(Directory.GetCurrentDirectory(), "data");
 var port = config.GetValue<int?>("CosmosEmulator:Port") ?? 8081;
+var inMemory = config.GetValue<bool>("CosmosEmulator:InMemory");
 
 // Generate self-signed certificate for HTTPS
 var cert = GenerateSelfSignedCert();
@@ -45,7 +47,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 // Register services
-builder.Services.AddSingleton(new SqliteStorageProvider(dataPath));
+builder.Services.AddSingleton(new SqliteStorageProvider(dataPath, inMemory));
 builder.Services.AddSingleton(new HmacSignatureValidator(masterKey));
 builder.Services.AddTransient<DatabaseRepository>();
 builder.Services.AddTransient<ContainerRepository>();

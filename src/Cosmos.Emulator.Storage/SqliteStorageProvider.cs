@@ -6,16 +6,33 @@ public class SqliteStorageProvider
 {
     private readonly string _dataDirectory;
     private readonly string _catalogConnectionString;
+    private readonly bool _inMemory;
 
-    public SqliteStorageProvider(string dataDirectory)
+    // For in-memory mode, keep one connection per database alive so the shared cache isn't dropped
+    private readonly Dictionary<string, SqliteConnection> _keepAlive = new();
+
+    public SqliteStorageProvider(string dataDirectory, bool inMemory = false)
     {
         _dataDirectory = dataDirectory;
-        _catalogConnectionString = $"Data Source={Path.Combine(_dataDirectory, "_catalog.db")}";
+        _inMemory = inMemory;
+        _catalogConnectionString = inMemory
+            ? "Data Source=file:_catalog?mode=memory&cache=shared"
+            : $"Data Source={Path.Combine(_dataDirectory, "_catalog.db")}";
     }
 
     public void Initialize()
     {
-        Directory.CreateDirectory(_dataDirectory);
+        if (!_inMemory)
+            Directory.CreateDirectory(_dataDirectory);
+
+        if (_inMemory)
+        {
+            // Keep a connection alive so the shared in-memory DB persists
+            var keep = new SqliteConnection(_catalogConnectionString);
+            keep.Open();
+            _keepAlive["_catalog"] = keep;
+        }
+
         using var conn = GetCatalogConnection();
         Schema.SchemaInitializer.InitializeCatalog(conn);
     }
@@ -25,7 +42,9 @@ public class SqliteStorageProvider
         var conn = new SqliteConnection(_catalogConnectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
+        cmd.CommandText = _inMemory
+            ? "PRAGMA foreign_keys=ON;"
+            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
         cmd.ExecuteNonQuery();
         return conn;
     }
@@ -52,23 +71,54 @@ public class SqliteStorageProvider
         // Always try to resolve — the caller might pass a _rid or a user-facing name
         databaseId = ResolveDatabaseId(databaseId);
 
-        var dbPath = Path.Combine(_dataDirectory, $"{SanitizeFileName(databaseId)}.db");
-        var conn = new SqliteConnection($"Data Source={dbPath}");
+        string connStr;
+        if (_inMemory)
+        {
+            var safeName = SanitizeFileName(databaseId);
+            connStr = $"Data Source=file:{safeName}?mode=memory&cache=shared";
+
+            // Ensure keep-alive connection exists for this database
+            if (!_keepAlive.ContainsKey(safeName))
+            {
+                var keep = new SqliteConnection(connStr);
+                keep.Open();
+                _keepAlive[safeName] = keep;
+            }
+        }
+        else
+        {
+            var dbPath = Path.Combine(_dataDirectory, $"{SanitizeFileName(databaseId)}.db");
+            connStr = $"Data Source={dbPath}";
+        }
+
+        var conn = new SqliteConnection(connStr);
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
+        cmd.CommandText = _inMemory
+            ? "PRAGMA foreign_keys=ON;"
+            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
         cmd.ExecuteNonQuery();
         return conn;
     }
 
     public void DeleteDatabaseFile(string databaseId)
     {
-        var dbPath = Path.Combine(_dataDirectory, $"{SanitizeFileName(databaseId)}.db");
+        var safeName = SanitizeFileName(databaseId);
+
+        if (_inMemory)
+        {
+            // Close the keep-alive connection — this drops the in-memory DB
+            if (_keepAlive.Remove(safeName, out var keep))
+                keep.Dispose();
+            return;
+        }
+
+        var dbPath = Path.Combine(_dataDirectory, $"{safeName}.db");
 
         // Clear SQLite connection pool so file handles are released
         SqliteConnection.ClearPool(new SqliteConnection($"Data Source={dbPath}"));
 
-        var basePath = Path.Combine(_dataDirectory, SanitizeFileName(databaseId));
+        var basePath = Path.Combine(_dataDirectory, safeName);
         foreach (var ext in new[] { ".db", ".db-wal", ".db-shm" })
         {
             var path = basePath + ext;
@@ -79,6 +129,12 @@ public class SqliteStorageProvider
 
     public bool DatabaseFileExists(string databaseId)
     {
+        if (_inMemory)
+        {
+            var safeName = SanitizeFileName(databaseId);
+            return _keepAlive.ContainsKey(safeName);
+        }
+
         var dbPath = Path.Combine(_dataDirectory, $"{SanitizeFileName(databaseId)}.db");
         return File.Exists(dbPath);
     }
