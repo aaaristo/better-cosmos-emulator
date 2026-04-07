@@ -143,6 +143,142 @@ public class ChangeFeedTests
         allChanges.Count.ShouldBeGreaterThanOrEqualTo(2);
     }
 
+    [Fact]
+    public async Task LatestVersionChangeFeed_FullIterationPattern_ShouldWork()
+    {
+        // Simulates CosmosChangeNotifierFunction pattern:
+        // 1. Pre-existing data in container (50 docs)
+        // 2. Start change feed from Beginning with small page size (5)
+        // 3. Iterate through ALL historical entries across many pages until 304
+        // 4. New change arrives
+        // 5. Resume iteration — should pick up the new change
+        var container = await CreateTempContainer();
+
+        // Pre-existing data (simulates historical documents)
+        const int historicalCount = 50;
+        for (int i = 0; i < historicalCount; i++)
+        {
+            await container.CreateItemAsync(
+                new { id = $"historical-{i:D3}", partitionKey = "pk1", name = $"Old-{i}" },
+                new PartitionKey("pk1"));
+        }
+
+        // Start from Beginning with small page size to force multiple iterations
+        var feedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.LatestVersion,
+            new ChangeFeedRequestOptions { PageSizeHint = 5 });
+
+        var historicalChanges = new List<dynamic>();
+        string? continuationToken = null;
+        int pageCount = 0;
+        while (feedIterator.HasMoreResults)
+        {
+            var response = await feedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+            {
+                continuationToken = response.ContinuationToken;
+                break;
+            }
+            historicalChanges.AddRange(response);
+            continuationToken = response.ContinuationToken;
+            pageCount++;
+        }
+
+        historicalChanges.Count.ShouldBe(historicalCount);
+        pageCount.ShouldBeGreaterThan(1); // must have paginated
+        continuationToken.ShouldNotBeNull();
+
+        // Now add a new document (simulates a dispatch)
+        await container.CreateItemAsync(
+            new { id = "new-change", partitionKey = "pk1", name = "NewItem", Repo = "Chain" },
+            new PartitionKey("pk1"));
+
+        // Resume from continuation — should pick up the new change immediately
+        var resumedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.ContinuationToken(continuationToken),
+            ChangeFeedMode.LatestVersion,
+            new ChangeFeedRequestOptions { PageSizeHint = 5 });
+
+        var newChanges = new List<dynamic>();
+        while (resumedIterator.HasMoreResults)
+        {
+            var response = await resumedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                break;
+            newChanges.AddRange(response);
+        }
+
+        newChanges.Count.ShouldBe(1);
+        ((string)newChanges[0].id).ShouldBe("new-change");
+    }
+
+    [Fact]
+    public async Task LatestVersionChangeFeed_MultipleUpdates_ShouldReturnLatestState()
+    {
+        // Verify that LatestVersion returns the CURRENT state, not intermediate versions
+        var container = await CreateTempContainer();
+
+        await container.CreateItemAsync(
+            new { id = "item-1", partitionKey = "pk1", name = "v1" },
+            new PartitionKey("pk1"));
+
+        // Update the same item multiple times
+        await container.ReplaceItemAsync(
+            new { id = "item-1", partitionKey = "pk1", name = "v2" },
+            "item-1", new PartitionKey("pk1"));
+        await container.ReplaceItemAsync(
+            new { id = "item-1", partitionKey = "pk1", name = "v3" },
+            "item-1", new PartitionKey("pk1"));
+
+        // Change feed should return the latest version
+        var feedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.LatestVersion);
+
+        var changes = new List<dynamic>();
+        while (feedIterator.HasMoreResults)
+        {
+            var response = await feedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                break;
+            changes.AddRange(response);
+        }
+
+        // LatestVersion should return 1 document with latest state
+        changes.Count.ShouldBe(1);
+        ((string)changes[0].name).ShouldBe("v3");
+    }
+
+    [Fact]
+    public async Task LatestVersionChangeFeed_CrossPartition_ShouldReturnAllPartitions()
+    {
+        // Verify change feed works across partitions (no partition key filter)
+        var container = await CreateTempContainer();
+
+        await container.CreateItemAsync(
+            new { id = "1", partitionKey = "pk1", name = "A" }, new PartitionKey("pk1"));
+        await container.CreateItemAsync(
+            new { id = "2", partitionKey = "pk2", name = "B" }, new PartitionKey("pk2"));
+        await container.CreateItemAsync(
+            new { id = "3", partitionKey = "pk3", name = "C" }, new PartitionKey("pk3"));
+
+        var feedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.LatestVersion);
+
+        var changes = new List<dynamic>();
+        while (feedIterator.HasMoreResults)
+        {
+            var response = await feedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                break;
+            changes.AddRange(response);
+        }
+
+        changes.Count.ShouldBe(3);
+    }
+
     private async Task<Container> CreateTempContainer()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";
