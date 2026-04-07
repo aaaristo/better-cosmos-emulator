@@ -251,32 +251,68 @@ public class ChangeFeedTests
     }
 
     [Fact]
-    public async Task LatestVersionChangeFeed_CrossPartition_ShouldReturnAllPartitions()
+    public async Task LatestVersionChangeFeed_NewPartitionAfterDrain_ShouldBeVisible()
     {
-        // Verify change feed works across partitions (no partition key filter)
-        var container = await CreateTempContainer();
+        // Production scenario: CosmosChangeNotifierFunction drains change feed for
+        // partition "Chain", then a write happens in partition "AMA001". The next
+        // change feed poll must see the AMA001 change.
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"test-coll-{Guid.NewGuid():N}", "/Repo")).Container;
 
+        // Write to partition "Chain"
         await container.CreateItemAsync(
-            new { id = "1", partitionKey = "pk1", name = "A" }, new PartitionKey("pk1"));
+            new { id = "sub-1", Repo = "Chain", Path = "/subscription/1" },
+            new PartitionKey("Chain"));
         await container.CreateItemAsync(
-            new { id = "2", partitionKey = "pk2", name = "B" }, new PartitionKey("pk2"));
-        await container.CreateItemAsync(
-            new { id = "3", partitionKey = "pk3", name = "C" }, new PartitionKey("pk3"));
+            new { id = "sub-2", Repo = "Chain", Path = "/subscription/2" },
+            new PartitionKey("Chain"));
 
+        // Drain all changes
         var feedIterator = container.GetChangeFeedIterator<dynamic>(
             ChangeFeedStartFrom.Beginning(),
-            ChangeFeedMode.LatestVersion);
+            ChangeFeedMode.LatestVersion,
+            new ChangeFeedRequestOptions { PageSizeHint = 5 });
 
-        var changes = new List<dynamic>();
+        string? continuationToken = null;
+        var drained = new List<dynamic>();
         while (feedIterator.HasMoreResults)
         {
             var response = await feedIterator.ReadNextAsync();
             if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+            {
+                continuationToken = response.ContinuationToken;
                 break;
-            changes.AddRange(response);
+            }
+            drained.AddRange(response);
+            continuationToken = response.ContinuationToken;
         }
 
-        changes.Count.ShouldBe(3);
+        drained.Count.ShouldBe(2);
+
+        // Now write to a DIFFERENT partition "AMA001"
+        await container.CreateItemAsync(
+            new { id = "obj-1", Repo = "AMA001", Path = "/data/item-1", Hash = "abc123" },
+            new PartitionKey("AMA001"));
+
+        // Resume change feed — must see the AMA001 change
+        var resumedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.ContinuationToken(continuationToken!),
+            ChangeFeedMode.LatestVersion,
+            new ChangeFeedRequestOptions { PageSizeHint = 5 });
+
+        var newChanges = new List<dynamic>();
+        while (resumedIterator.HasMoreResults)
+        {
+            var response = await resumedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                break;
+            newChanges.AddRange(response);
+        }
+
+        newChanges.Count.ShouldBe(1);
+        ((string)newChanges[0].Repo).ShouldBe("AMA001");
+        ((string)newChanges[0].Path).ShouldBe("/data/item-1");
     }
 
     private async Task<Container> CreateTempContainer()
