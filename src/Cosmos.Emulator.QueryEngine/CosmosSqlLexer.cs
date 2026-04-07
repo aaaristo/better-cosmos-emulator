@@ -93,7 +93,7 @@ public class CosmosSqlLexer
             var token = c switch
             {
                 '\'' => ReadString(),
-                '"' => ReadQuotedIdentifier(),
+                '"' => ReadDoubleQuotedString(),
                 '@' => ReadParameter(),
                 '.' => MakeToken(TokenType.Dot, "."),
                 ',' => MakeToken(TokenType.Comma, ","),
@@ -180,7 +180,7 @@ public class CosmosSqlLexer
         throw new FormatException($"Unterminated string starting at position {start}");
     }
 
-    private Token ReadQuotedIdentifier()
+    private Token ReadDoubleQuotedString()
     {
         var start = _pos;
         _pos++; // skip opening quote
@@ -195,7 +195,9 @@ public class CosmosSqlLexer
         if (_pos < _input.Length)
             _pos++; // skip closing quote
 
-        return new Token(TokenType.Identifier, sb.ToString(), start);
+        // In Cosmos SQL, double-quoted strings are string literals (like single-quoted).
+        // EF Core uses c["PropertyName"] where the index is a string literal.
+        return new Token(TokenType.StringLiteral, sb.ToString(), start);
     }
 
     private Token ReadParameter()

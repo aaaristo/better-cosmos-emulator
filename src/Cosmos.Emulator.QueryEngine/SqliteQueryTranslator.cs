@@ -160,12 +160,16 @@ public class SqliteQueryTranslator
     }
 
     /// <summary>
-    /// For SELECT VALUE, we need to wrap the result as a JSON value so it can be returned properly.
+    /// For SELECT VALUE, we need to wrap scalar results as JSON values.
+    /// But if the expression is the full document (the FROM alias), return body directly.
     /// </summary>
     private string TranslateSelectValueExpression(Expression expr)
     {
         var translated = TranslateExpression(expr);
-        // Wrap in json() to ensure it's returned as valid JSON
+        // If the expression is the full document body, return it directly — no json_quote wrapping.
+        // json_quote would turn the JSON object into an escaped string.
+        if (translated == "body")
+            return "body";
         return $"json_quote({translated})";
     }
 
