@@ -78,4 +78,54 @@ public class SqliteJsonTest
         Assert.Equal("Alice,s,Small", rows[0]);
         Assert.Equal("Alice,l,Large", rows[1]);
     }
+
+    [Fact]
+    public void JsonEach_WithParameterArray_ShouldMatchColumnValues()
+    {
+        using var conn = new SqliteConnection("Data Source=:memory:");
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE test (
+                id TEXT PRIMARY KEY,
+                partition_key TEXT,
+                body TEXT,
+                etag TEXT,
+                ts INTEGER,
+                is_deleted INTEGER DEFAULT 0,
+                lsn INTEGER,
+                rid TEXT,
+                [Path] TEXT
+            );
+            INSERT INTO test VALUES ('1', '["pk1"]', '{"id":"1","Path":"/repo/item-a"}', '"e1"', 1, 0, 1, 'r1', '/repo/item-a');
+            INSERT INTO test VALUES ('2', '["pk2"]', '{"id":"2","Path":"/repo/item-b"}', '"e2"', 1, 0, 2, 'r2', '/repo/item-b');
+            INSERT INTO test VALUES ('3', '["pk1"]', '{"id":"3","Path":"/repo/item-c"}', '"e3"', 1, 0, 3, 'r3', '/repo/item-c');
+        """;
+        cmd.ExecuteNonQuery();
+
+        // Verify json_each works in a simple SELECT
+        cmd.CommandText = "SELECT count(*) FROM json_each('[\"a\",\"b\"]')";
+        var jeCount = (long)cmd.ExecuteScalar()!;
+        Assert.Equal(2, jeCount); // basic json_each works
+
+        // Test: IN with subquery using json_each (inline literal) — works in SQLite
+        cmd.CommandText = """
+            SELECT count(*) FROM test WHERE is_deleted = 0
+            AND [Path] IN (SELECT json_each.value FROM json_each('["/repo/item-a","/repo/item-b"]'))
+        """;
+        var count1 = (long)cmd.ExecuteScalar()!;
+        Assert.Equal(2, count1);
+
+        // Our emulator's fix: expand ARRAY_CONTAINS(@param, expr) into expr IN (@p0, @p1, ...)
+        cmd.CommandText = """
+            SELECT count(*) FROM test WHERE is_deleted = 0
+            AND [Path] IN (@p0, @p1)
+        """;
+        cmd.Parameters.Clear();
+        cmd.Parameters.AddWithValue("@p0", "/repo/item-a");
+        cmd.Parameters.AddWithValue("@p1", "/repo/item-b");
+        var count2 = (long)cmd.ExecuteScalar()!;
+        Assert.Equal(2, count2);
+    }
 }

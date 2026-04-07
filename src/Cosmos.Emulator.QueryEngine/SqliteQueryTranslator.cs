@@ -390,7 +390,44 @@ public class SqliteQueryTranslator
         var arrayExpr = arguments[0];
         var valueExpr = TranslateExpression(arguments[1]);
 
-        // We need json_each to search within the array
+        // When the array is a parameter (e.g., ARRAY_CONTAINS(@pathsToLookup, c["Path"])),
+        // SQLite's json_each() doesn't work with bound parameters. Instead, resolve the
+        // parameter value and expand it to an IN clause with individual parameters.
+        if (arrayExpr is ParameterExpression paramExpr && _parameters.TryGetValue(paramExpr.Name, out var paramValue))
+        {
+            var jsonStr = paramValue?.ToString() ?? "[]";
+            try
+            {
+                var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonStr);
+                var inParams = new List<string>();
+                int idx = 0;
+                foreach (var elem in jsonDoc.RootElement.EnumerateArray())
+                {
+                    var pName = $"@__ac_{_paramCounter++}";
+                    _parameters[pName] = elem.ValueKind switch
+                    {
+                        System.Text.Json.JsonValueKind.String => elem.GetString()!,
+                        System.Text.Json.JsonValueKind.Number when elem.TryGetInt64(out var l) => l,
+                        System.Text.Json.JsonValueKind.Number => elem.GetDouble(),
+                        _ => elem.GetRawText()
+                    };
+                    inParams.Add(pName);
+                    idx++;
+                }
+                // Remove the original array parameter — it's no longer needed
+                _parameters.Remove(paramExpr.Name);
+                if (inParams.Count == 0)
+                    return "0"; // empty array → always false
+                return $"({valueExpr} IN ({string.Join(", ", inParams)}))";
+            }
+            catch
+            {
+                // Fall through to json_each approach if parsing fails
+            }
+        }
+
+        // For document-level arrays (e.g., ARRAY_CONTAINS(c.tags, "value")),
+        // use json_each to search within the array
         if (arrayExpr is PropertyAccess pa)
         {
             var path = GetPropertyPath(pa);

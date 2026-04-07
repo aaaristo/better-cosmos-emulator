@@ -183,7 +183,11 @@ public static class DocumentEndpoints
                     sql += $" OFFSET {queryOffset}";
             }
 
+            File.AppendAllText("C:/Users/ua222060/Projects/better-cosmos-emulator/query-debug.log",
+                $"[SQL] {sql}\n[PARAMS] {string.Join(", ", parameters.Select(p => $"{p.Key}={p.Value}"))}\n");
             var results = docRepo.ExecuteQuery(dbId, collId, sql, parameters);
+            File.AppendAllText("C:/Users/ua222060/Projects/better-cosmos-emulator/query-debug.log",
+                $"[RESULTS] {results.Count}\n---\n");
 
             context.Response.Headers["x-ms-item-count"] = results.Count.ToString();
 
