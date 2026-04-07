@@ -175,6 +175,9 @@ public class EmulatorFixture : IAsyncLifetime
         if (_app is not null)
             await _app.StopAsync();
 
+        // Clear all SQLite connection pools so file handles are released (WAL mode keeps files open)
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
         try
         {
             if (Directory.Exists(_dataPath))
