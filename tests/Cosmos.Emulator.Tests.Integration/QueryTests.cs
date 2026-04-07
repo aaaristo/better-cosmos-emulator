@@ -257,6 +257,46 @@ public class QueryTests
         results.Count.ShouldBe(2);
     }
 
+    [Fact]
+    public async Task EqualsNull_ShouldMatchNullValues()
+    {
+        // Cosmos SQL allows "c.Deleted = null" as syntactic sugar for IS_NULL
+        var container = await CreateTempContainer();
+
+        await container.CreateItemAsync(
+            new { id = "1", partitionKey = "pk1", Deleted = (long?)null, name = "Active" },
+            new PartitionKey("pk1"));
+        await container.CreateItemAsync(
+            new { id = "2", partitionKey = "pk1", Deleted = 1700000000L, name = "Deleted" },
+            new PartitionKey("pk1"));
+        await container.CreateItemAsync(
+            new { id = "3", partitionKey = "pk1", Deleted = (long?)null, name = "AlsoActive" },
+            new PartitionKey("pk1"));
+
+        // = null
+        var q1 = new QueryDefinition("SELECT * FROM c WHERE c.Deleted = null");
+        var r1 = new List<dynamic>();
+        using var it1 = container.GetItemQueryIterator<dynamic>(q1);
+        while (it1.HasMoreResults)
+        {
+            var page = await it1.ReadNextAsync();
+            r1.AddRange(page);
+        }
+        r1.Count.ShouldBe(2);
+
+        // != null
+        var q2 = new QueryDefinition("SELECT * FROM c WHERE c.Deleted != null");
+        var r2 = new List<dynamic>();
+        using var it2 = container.GetItemQueryIterator<dynamic>(q2);
+        while (it2.HasMoreResults)
+        {
+            var page = await it2.ReadNextAsync();
+            r2.AddRange(page);
+        }
+        r2.Count.ShouldBe(1);
+        ((string)r2[0].name).ShouldBe("Deleted");
+    }
+
     private async Task<Container> SeedTestData()
     {
         var container = await CreateTempContainer();

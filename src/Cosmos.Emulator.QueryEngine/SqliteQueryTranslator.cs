@@ -298,6 +298,18 @@ public class SqliteQueryTranslator
     {
         var left = TranslateExpression(bin.Left);
         var right = TranslateExpression(bin.Right);
+
+        // Cosmos SQL allows "c.Deleted = null" / "c.Deleted != null" which must
+        // become IS NULL / IS NOT NULL in SQLite (column = NULL is always false).
+        if (right == "NULL" && bin.Operator == "=")
+            return $"({left} IS NULL)";
+        if (right == "NULL" && (bin.Operator == "!=" || bin.Operator == "<>"))
+            return $"({left} IS NOT NULL)";
+        if (left == "NULL" && bin.Operator == "=")
+            return $"({right} IS NULL)";
+        if (left == "NULL" && (bin.Operator == "!=" || bin.Operator == "<>"))
+            return $"({right} IS NOT NULL)";
+
         var op = bin.Operator switch
         {
             "||" => "||", // string concatenation in both SQL dialects
