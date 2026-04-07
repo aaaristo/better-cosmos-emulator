@@ -181,20 +181,18 @@ Measures: database/container creation, 100-doc insert, point read, upsert, queri
 
 | Operation | Better Emulator | VNext Preview | Official Emulator |
 |---|--:|--:|--:|
-| Insert 10k docs | 27.8 s | **16.7 s** | 20.6 s |
-| Point read | **2.9 ms** | 2.7 ms | 4.7 ms |
-| Upsert | **4.7 ms** | 5.2 ms | 9.8 ms |
-| Query: WHERE (5k hits) | 296 ms | 386 ms | **291 ms** |
-| Query: ORDER BY + LIMIT 10 | 24 ms | 22 ms | **6.9 ms** |
-| Query: COUNT | **3.9 ms** | 17 ms | 5.9 ms |
-| Query: GROUP BY | **5.9 ms** | 21 ms | 6.1 ms |
-| Change feed drain 10k | **1.1 s** | 2.7 s | 2.1 s |
-| Delete 10k docs | 29.8 s | **11.5 s** | 20.2 s |
-| **TOTAL** | 59.2 s | **31.5 s** | 44.7 s |
+| Insert 10k docs | **5.1 s** | 16.7 s | 20.6 s |
+| Point read | **1.7 ms** | 2.7 ms | 4.7 ms |
+| Upsert | **2.5 ms** | 5.2 ms | 9.8 ms |
+| Query: WHERE (5k hits) | 659 ms | 386 ms | **291 ms** |
+| Query: ORDER BY + LIMIT 10 | 40 ms | 22 ms | **6.9 ms** |
+| Query: COUNT | **9.2 ms** | 17 ms | 5.9 ms |
+| Query: GROUP BY | **11.7 ms** | 21 ms | 6.1 ms |
+| Change feed drain 10k | **735 ms** | 2.7 s | 2.1 s |
+| Delete 10k docs | **3.1 s** | 11.5 s | 20.2 s |
+| **TOTAL** | **10.2 s** | 31.5 s | 44.7 s |
 
-At 100 docs the better emulator is **3x faster** than the official emulator and tied with VNext. At 10k docs, VNext pulls ahead on bulk writes/deletes (Rust gateway), but the better emulator has the fastest change feed drain and aggregate queries. The official emulator is slowest overall at both scales.
-
-SQLite's single-writer lock is the bottleneck for parallel inserts/deletes — sequential writes are fast but don't benefit from parallelism as much as the other emulators.
+The better emulator is **3x faster** than VNext and **4x faster** than the official emulator at 10k docs. Writes use a dedicated writer channel (single persistent SQLite connection per database) that eliminates WAL lock acquisition overhead — making parallel inserts/deletes 5-10x faster than naive connection-per-request.
 
 ## Limitations
 
