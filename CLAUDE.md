@@ -42,18 +42,21 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 ### Queries
 - SELECT *, projections, VALUE, DISTINCT
 - WHERE with =, !=, <, >, <=, >=, AND, OR, NOT
-- ORDER BY (ASC/DESC), TOP, OFFSET/LIMIT
+- ORDER BY (ASC/DESC), TOP, OFFSET/LIMIT (including parameterized `@param`)
 - GROUP BY with aggregates
 - COUNT, SUM, AVG, MIN, MAX
 - IN, BETWEEN
-- CONTAINS, STARTSWITH, IS_DEFINED, ARRAY_CONTAINS
-- String functions (UPPER, LOWER, etc.)
+- CONTAINS, STARTSWITH, ENDSWITH, IS_DEFINED, IS_NULL, ARRAY_CONTAINS
+- `= null` / `!= null` → translated to IS [NOT] NULL (Cosmos SQL syntactic sugar)
+- String functions (UPPER, LOWER, CONCAT, SUBSTRING, REPLACE, etc.)
 - Coalesce (??) operator
 - JSON object literals: `SELECT {"name": c.name, "age": c.age} FROM c`
 - JSON array literals: `SELECT [c.name, c.age] FROM c`
 - JOIN (intra-document arrays): `SELECT t FROM c JOIN t IN c.tags`
 - Parameterized queries (@param)
 - Cross-partition queries
+- Bracket notation: `c["PropertyName"]` (EF Core Cosmos provider syntax)
+- `FROM root c` / `FROM root AS c` syntax
 
 ### Change Feed
 - LatestVersion mode (A-IM: Incremental Feed)
@@ -112,6 +115,29 @@ Format: `{pkRangeId}:-1#{lsn}` (e.g., `0:-1#1`). The old format `0:0` causes SDK
 ### Auth
 Currently disabled (accepts any valid-looking Authorization header). Full HMAC-SHA256 validation can be added later — the tricky part is that the SDK uses _rid-based paths where base64 is case-sensitive while the spec says to lowercase.
 
+### EF Core Cosmos Provider Compatibility
+EF Core's Cosmos provider generates queries differently from direct SDK usage:
+- **Bracket notation**: `c["PropertyName"]` instead of `c.PropertyName` — the lexer tokenizes `"PropertyName"` as a string literal, and the translator handles `ArrayIndexAccess` with string keys as property access
+- **`FROM root AS c`**: EF Core uses the `root` keyword with explicit `AS` alias — the parser strips `root` and uses the alias
+- **`= null` syntax**: EF Core generates `c.Deleted = null` instead of `IS_NULL(c.Deleted)` — the translator converts `= NULL` to `IS NULL` and `!= NULL` to `IS NOT NULL`
+- **`IsETagConcurrency()`**: Maps the entity's `Etag` property to `_etag` in the document body, uses `If-Match` header on replace — fully supported
+- **Parameterized OFFSET/LIMIT**: `OFFSET 0 LIMIT @p` — parameters resolved at translation time
+- **`ARRAY_CONTAINS(@param, c["Path"])`**: Array parameter expanded to `IN (@p0, @p1, ...)` because SQLite's `json_each()` doesn't work with bound parameters
+- **`SELECT VALUE c`**: Returns `body` directly (not `json_quote(body)`) to avoid wrapping objects as escaped strings
+
+### SQLite Quirks
+- `json_each()` does NOT work with bound parameters — silently returns 0 rows. Array parameters must be expanded to individual values at translation time.
+- `json_type(json_extract(body, path))` returns NULL (not `'null'`) for JSON null values because `json_extract` converts JSON null to SQL NULL. Use `json_type(body, path)` two-arg form instead.
+- `column = NULL` is always false in SQLite — must use `IS NULL`. The translator auto-converts `= null` / `!= null` comparisons.
+- Column names are case-insensitive — user properties like `ETag` collide with system column `etag`. The `FlattenObject` method skips properties matching system column names.
+- `ALTER TABLE ADD COLUMN` fails on duplicate names — wrapped with try/catch as safety net.
+
+### Query Plan Endpoint
+Older SDKs (3.41.0 via EF Core) send `x-ms-cosmos-is-query-plan-request: True` before executing queries. The emulator returns a query plan that:
+- For ORDER BY queries: rewrites the query to `orderByItems`/`payload` format so the SDK's `StreamingOrderByCrossPartitionQueryPipelineStage` works correctly
+- For non-ORDER BY queries: returns a passthrough plan with the original query as `rewrittenQuery`
+- Newer SDKs (3.46+) rewrite queries themselves without requesting a plan
+
 ### SDK client configuration for tests
 ```csharp
 new CosmosClientOptions
@@ -131,13 +157,13 @@ src/
   Cosmos.Emulator.Storage/      # SQLite repositories, schema, hybrid columns
   Cosmos.Emulator.QueryEngine/  # Cosmos SQL → SQLite translator (lexer, parser, AST)
 tests/
-  Cosmos.Emulator.Tests.Integration/  # 66 SDK-based e2e tests
+  Cosmos.Emulator.Tests.Integration/  # SDK-based e2e tests + EF Core tests
   Cosmos.Emulator.Tests.Unit/         # Unit tests (SQLite JSON behavior)
 ```
 
 ## Current Test Status
 
-74 integration tests + 1 unit test. 0 skipped.
+90 integration tests + 2 unit tests. 0 skipped.
 
 ## Debugging Failing Tests
 

@@ -6,10 +6,10 @@ A lightweight, SQLite-backed Azure Cosmos DB emulator for local development and 
 
 The official Cosmos DB emulator is heavy, Windows-only (Linux Docker image is limited), and lacks features like the AllVersionsAndDeletes change feed mode. This emulator is:
 
-- **Fast** — starts in milliseconds, runs 74 tests in under 5 seconds
+- **Fast** — starts in milliseconds, runs 90 tests in under 5 seconds
 - **Lightweight** — single .NET process, SQLite storage, no Docker required
 - **Feature-rich** — indexing, change feed (both modes), PATCH, JOIN, TTL, full SQL query engine
-- **SDK-compatible** — tested against the official `Microsoft.Azure.Cosmos` SDK
+- **SDK-compatible** — tested against the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider
 
 ## Quick Start
 
@@ -80,7 +80,7 @@ SELECT {"name": c.name, "score": c.age * 2} FROM c
 SELECT VALUE c.nickname ?? c.name FROM c
 ```
 
-Supported: SELECT, FROM, WHERE, ORDER BY, TOP, OFFSET/LIMIT, DISTINCT, GROUP BY, JOIN, VALUE, AS, aggregates (COUNT, SUM, AVG, MIN, MAX), IN, BETWEEN, CONTAINS, STARTSWITH, ENDSWITH, IS_DEFINED, IS_NULL, ARRAY_CONTAINS, UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, REPLACE, ABS, FLOOR, CEILING, ROUND, coalesce (??), JSON object/array literals, parameterized queries.
+Supported: SELECT, FROM, WHERE, ORDER BY, TOP, OFFSET/LIMIT (parameterized), DISTINCT, GROUP BY, JOIN, VALUE, AS, aggregates (COUNT, SUM, AVG, MIN, MAX), IN, BETWEEN, CONTAINS, STARTSWITH, ENDSWITH, IS_DEFINED, IS_NULL, ARRAY_CONTAINS, UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, REPLACE, ABS, FLOOR, CEILING, ROUND, coalesce (??), `= null`/`!= null`, JSON object/array literals, parameterized queries, bracket notation (`c["prop"]`), `FROM root [AS] alias`.
 
 ### Change Feed
 - **LatestVersion** mode — track inserts and updates
@@ -134,7 +134,7 @@ Document  →  Row with hybrid columns:
 dotnet test tests/Cosmos.Emulator.Tests.Integration
 ```
 
-74 integration tests covering all features using the official `Microsoft.Azure.Cosmos` SDK.
+90 integration tests covering all features using the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider (`IsETagConcurrency`, bracket notation, `= null` syntax).
 
 ## Limitations
 
