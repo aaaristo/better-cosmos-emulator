@@ -146,4 +146,4 @@ dotnet test tests/Cosmos.Emulator.Tests.Integration
 
 ## License
 
-MIT
+Apache-2.0
