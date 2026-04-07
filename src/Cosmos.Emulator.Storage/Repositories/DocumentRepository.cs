@@ -91,120 +91,134 @@ public class DocumentRepository
     }
 
     public (CosmosDocument doc, long newLsn) Create(string databaseId, string containerId, CosmosDocument document)
+        => CreateAsync(databaseId, containerId, document).GetAwaiter().GetResult();
+
+    public Task<(CosmosDocument doc, long newLsn)> CreateAsync(string databaseId, string containerId, CosmosDocument document)
     {
-        using var conn = _storage.GetDatabaseConnection(databaseId);
-        using var tx = conn.BeginTransaction();
-
-        var newLsn = IncrementLsn(conn, containerId);
-        document.Lsn = newLsn;
-
-        // Ensure columns exist for top-level properties, then insert
-        var dynamicCols = EnsureColumnsAndExtract(conn, databaseId, containerId, document.Body);
-
-        var table = Q(containerId);
-        var colNames = "id, rid, partition_key, body, etag, ts, is_deleted, lsn";
-        var colParams = "@id, @rid, @pk, @body, @etag, @ts, 0, @lsn";
-
-        foreach (var (colName, _) in dynamicCols)
+        return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
-            colNames += $", {Q(colName)}";
-            colParams += $", @dyn_{colName}";
-        }
+            using var tx = conn.BeginTransaction();
 
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"INSERT INTO {table} ({colNames}) VALUES ({colParams})";
-        cmd.Parameters.AddWithValue("@id", document.Id);
-        cmd.Parameters.AddWithValue("@rid", document.Rid);
-        cmd.Parameters.AddWithValue("@pk", document.PartitionKey);
-        cmd.Parameters.AddWithValue("@body", document.Body.GetRawText());
-        cmd.Parameters.AddWithValue("@etag", document.Etag);
-        cmd.Parameters.AddWithValue("@ts", document.Ts);
-        cmd.Parameters.AddWithValue("@lsn", newLsn);
+            var newLsn = IncrementLsn(conn, containerId);
+            document.Lsn = newLsn;
 
-        foreach (var (colName, value) in dynamicCols)
-        {
-            cmd.Parameters.AddWithValue($"@dyn_{colName}", value ?? (object)DBNull.Value);
-        }
+            var dynamicCols = EnsureColumnsAndExtract(conn, databaseId, containerId, document.Body);
 
-        cmd.ExecuteNonQuery();
+            var table = Q(containerId);
+            var colNames = "id, rid, partition_key, body, etag, ts, is_deleted, lsn";
+            var colParams = "@id, @rid, @pk, @body, @etag, @ts, 0, @lsn";
 
-        InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
-            "create", document.Body.GetRawText(), null, document.Ts, document.Etag);
+            foreach (var (colName, _) in dynamicCols)
+            {
+                colNames += $", {Q(colName)}";
+                colParams += $", @dyn_{colName}";
+            }
 
-        tx.Commit();
-        return (document, newLsn);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"INSERT INTO {table} ({colNames}) VALUES ({colParams})";
+            cmd.Parameters.AddWithValue("@id", document.Id);
+            cmd.Parameters.AddWithValue("@rid", document.Rid);
+            cmd.Parameters.AddWithValue("@pk", document.PartitionKey);
+            cmd.Parameters.AddWithValue("@body", document.Body.GetRawText());
+            cmd.Parameters.AddWithValue("@etag", document.Etag);
+            cmd.Parameters.AddWithValue("@ts", document.Ts);
+            cmd.Parameters.AddWithValue("@lsn", newLsn);
+
+            foreach (var (colName, value) in dynamicCols)
+            {
+                cmd.Parameters.AddWithValue($"@dyn_{colName}", value ?? (object)DBNull.Value);
+            }
+
+            cmd.ExecuteNonQuery();
+
+            InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
+                "create", document.Body.GetRawText(), null, document.Ts, document.Etag);
+
+            tx.Commit();
+            return (document, newLsn);
+        });
     }
 
     public (CosmosDocument doc, long newLsn) Replace(string databaseId, string containerId, CosmosDocument document)
+        => ReplaceAsync(databaseId, containerId, document).GetAwaiter().GetResult();
+
+    public Task<(CosmosDocument doc, long newLsn)> ReplaceAsync(string databaseId, string containerId, CosmosDocument document)
     {
-        using var conn = _storage.GetDatabaseConnection(databaseId);
-        using var tx = conn.BeginTransaction();
-
-        var prevBody = GetCurrentBody(conn, containerId, document.Id, document.PartitionKey);
-
-        var newLsn = IncrementLsn(conn, containerId);
-        document.Lsn = newLsn;
-
-        var dynamicCols = EnsureColumnsAndExtract(conn, databaseId, containerId, document.Body);
-
-        var table = Q(containerId);
-        var setClauses = "rid = @rid, body = @body, etag = @etag, ts = @ts, lsn = @lsn";
-
-        foreach (var (colName, _) in dynamicCols)
+        return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
-            setClauses += $", {Q(colName)} = @dyn_{colName}";
-        }
+            using var tx = conn.BeginTransaction();
 
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            UPDATE {table}
-            SET {setClauses}
-            WHERE id = @id AND partition_key = @pk AND is_deleted = 0
-            """;
-        cmd.Parameters.AddWithValue("@id", document.Id);
-        cmd.Parameters.AddWithValue("@rid", document.Rid);
-        cmd.Parameters.AddWithValue("@pk", document.PartitionKey);
-        cmd.Parameters.AddWithValue("@body", document.Body.GetRawText());
-        cmd.Parameters.AddWithValue("@etag", document.Etag);
-        cmd.Parameters.AddWithValue("@ts", document.Ts);
-        cmd.Parameters.AddWithValue("@lsn", newLsn);
+            var prevBody = GetCurrentBody(conn, containerId, document.Id, document.PartitionKey);
 
-        foreach (var (colName, value) in dynamicCols)
-        {
-            cmd.Parameters.AddWithValue($"@dyn_{colName}", value ?? (object)DBNull.Value);
-        }
+            var newLsn = IncrementLsn(conn, containerId);
+            document.Lsn = newLsn;
 
-        cmd.ExecuteNonQuery();
+            var dynamicCols = EnsureColumnsAndExtract(conn, databaseId, containerId, document.Body);
 
-        InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
-            "replace", document.Body.GetRawText(), prevBody, document.Ts, document.Etag);
+            var table = Q(containerId);
+            var setClauses = "rid = @rid, body = @body, etag = @etag, ts = @ts, lsn = @lsn";
 
-        tx.Commit();
-        return (document, newLsn);
+            foreach (var (colName, _) in dynamicCols)
+            {
+                setClauses += $", {Q(colName)} = @dyn_{colName}";
+            }
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE {table}
+                SET {setClauses}
+                WHERE id = @id AND partition_key = @pk AND is_deleted = 0
+                """;
+            cmd.Parameters.AddWithValue("@id", document.Id);
+            cmd.Parameters.AddWithValue("@rid", document.Rid);
+            cmd.Parameters.AddWithValue("@pk", document.PartitionKey);
+            cmd.Parameters.AddWithValue("@body", document.Body.GetRawText());
+            cmd.Parameters.AddWithValue("@etag", document.Etag);
+            cmd.Parameters.AddWithValue("@ts", document.Ts);
+            cmd.Parameters.AddWithValue("@lsn", newLsn);
+
+            foreach (var (colName, value) in dynamicCols)
+            {
+                cmd.Parameters.AddWithValue($"@dyn_{colName}", value ?? (object)DBNull.Value);
+            }
+
+            cmd.ExecuteNonQuery();
+
+            InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
+                "replace", document.Body.GetRawText(), prevBody, document.Ts, document.Etag);
+
+            tx.Commit();
+            return (document, newLsn);
+        });
     }
 
     public long Delete(string databaseId, string containerId, string documentId, string partitionKey, bool ttlExpired = false)
+        => DeleteAsync(databaseId, containerId, documentId, partitionKey, ttlExpired).GetAwaiter().GetResult();
+
+    public Task<long> DeleteAsync(string databaseId, string containerId, string documentId, string partitionKey, bool ttlExpired = false)
     {
-        using var conn = _storage.GetDatabaseConnection(databaseId);
-        using var tx = conn.BeginTransaction();
+        return _storage.ExecuteWriteAsync(databaseId, conn =>
+        {
+            using var tx = conn.BeginTransaction();
 
-        var prevBody = GetCurrentBody(conn, containerId, documentId, partitionKey);
+            var prevBody = GetCurrentBody(conn, containerId, documentId, partitionKey);
 
-        var newLsn = IncrementLsn(conn, containerId);
+            var newLsn = IncrementLsn(conn, containerId);
 
-        var table = Q(containerId);
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"DELETE FROM {table} WHERE id = @id AND partition_key = @pk";
-        cmd.Parameters.AddWithValue("@id", documentId);
-        cmd.Parameters.AddWithValue("@pk", partitionKey);
-        cmd.ExecuteNonQuery();
+            var table = Q(containerId);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {table} WHERE id = @id AND partition_key = @pk";
+            cmd.Parameters.AddWithValue("@id", documentId);
+            cmd.Parameters.AddWithValue("@pk", partitionKey);
+            cmd.ExecuteNonQuery();
 
-        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        InsertChangeFeedEntry(conn, containerId, documentId, partitionKey,
-            "delete", null, prevBody, ts, "", ttlExpired);
+            var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            InsertChangeFeedEntry(conn, containerId, documentId, partitionKey,
+                "delete", null, prevBody, ts, "", ttlExpired);
 
-        tx.Commit();
-        return newLsn;
+            tx.Commit();
+            return newLsn;
+        });
     }
 
     /// <summary>

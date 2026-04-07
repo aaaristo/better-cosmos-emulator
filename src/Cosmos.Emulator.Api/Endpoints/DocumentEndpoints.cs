@@ -93,11 +93,11 @@ public static class DocumentEndpoints
 
         if (existing is not null)
         {
-            docRepo.Replace(dbId, collId, document);
+            await docRepo.ReplaceAsync(dbId, collId, document);
         }
         else
         {
-            docRepo.Create(dbId, collId, document);
+            await docRepo.CreateAsync(dbId, collId, document);
         }
 
         context.Response.Headers["etag"] = etag;
@@ -628,7 +628,7 @@ public static class DocumentEndpoints
         return false;
     }
 
-    private static IResult DeleteDocument(
+    private static async Task<IResult> DeleteDocument(
         string dbId, string collId, string docId, HttpContext context,
         DatabaseRepository dbRepo, ContainerRepository containerRepo, DocumentRepository docRepo)
     {
@@ -646,7 +646,7 @@ public static class DocumentEndpoints
         if (!docRepo.Exists(dbId, collId, docId, partitionKey))
             return Results.Json(new { code = "NotFound", message = $"Entity with the specified id does not exist in the system. id = {docId}" }, statusCode: 404);
 
-        docRepo.Delete(dbId, collId, docId, partitionKey);
+        await docRepo.DeleteAsync(dbId, collId, docId, partitionKey);
         return Results.StatusCode(204);
     }
 
