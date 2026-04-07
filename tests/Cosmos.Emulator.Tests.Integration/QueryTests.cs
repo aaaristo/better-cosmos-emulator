@@ -274,6 +274,126 @@ public class QueryTests
         return container;
     }
 
+    [Fact]
+    public async Task StartsWith_IsNull_OrderBy_WithParams_ShouldWork()
+    {
+        // Production query pattern from SyncEngine:
+        // SELECT c.Path, c.Hash FROM c WHERE c.Repo = @repo AND STARTSWITH(c.Path, @prefix) AND IS_NULL(c.Deleted) ORDER BY c.Path OFFSET 0 LIMIT @pageSize
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"test-coll-{Guid.NewGuid():N}", "/Repo")).Container;
+
+        // Seed: 3 non-deleted items matching prefix, 1 deleted, 1 different prefix
+        await container.CreateItemAsync(new { id = "1", Repo = "Chain", Path = "/config/item-a", Hash = "aaa", Deleted = (long?)null }, new PartitionKey("Chain"));
+        await container.CreateItemAsync(new { id = "2", Repo = "Chain", Path = "/config/item-b", Hash = "bbb", Deleted = (long?)null }, new PartitionKey("Chain"));
+        await container.CreateItemAsync(new { id = "3", Repo = "Chain", Path = "/config/item-c", Hash = "ccc", Deleted = (long?)null }, new PartitionKey("Chain"));
+        await container.CreateItemAsync(new { id = "4", Repo = "Chain", Path = "/config/item-d", Hash = "ddd", Deleted = 1700000000L }, new PartitionKey("Chain"));
+        await container.CreateItemAsync(new { id = "5", Repo = "Chain", Path = "/other/item-e", Hash = "eee", Deleted = (long?)null }, new PartitionKey("Chain"));
+
+        var query = new QueryDefinition(
+            "SELECT c.Path, c.Hash FROM c WHERE c.Repo = @repo AND STARTSWITH(c.Path, @prefix) AND IS_NULL(c.Deleted) ORDER BY c.Path OFFSET 0 LIMIT @pageSize")
+            .WithParameter("@repo", "Chain")
+            .WithParameter("@prefix", "/config/")
+            .WithParameter("@pageSize", 10);
+
+        var results = new List<dynamic>();
+        using var iterator = container.GetItemQueryIterator<dynamic>(query,
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("Chain") });
+        while (iterator.HasMoreResults)
+        {
+            var page = await iterator.ReadNextAsync();
+            results.AddRange(page);
+        }
+
+        // Should return 3 non-deleted items with /config/ prefix, sorted by Path
+        results.Count.ShouldBe(3);
+        ((string)results[0].Path).ShouldBe("/config/item-a");
+        ((string)results[1].Path).ShouldBe("/config/item-b");
+        ((string)results[2].Path).ShouldBe("/config/item-c");
+    }
+
+    [Fact]
+    public async Task StartsWith_IsNull_OrderBy_Pagination_ShouldWork()
+    {
+        // Same query but with LIMIT 2 to verify pagination via OFFSET/LIMIT
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"test-coll-{Guid.NewGuid():N}", "/Repo")).Container;
+
+        for (int i = 0; i < 5; i++)
+        {
+            await container.CreateItemAsync(new
+            {
+                id = $"item-{i}",
+                Repo = "Chain",
+                Path = $"/config/item-{(char)('a' + i)}",
+                Hash = $"hash-{i}",
+                Deleted = (long?)null
+            }, new PartitionKey("Chain"));
+        }
+
+        // Page 1: OFFSET 0 LIMIT 2
+        var page1Query = new QueryDefinition(
+            "SELECT c.Path, c.Hash FROM c WHERE c.Repo = @repo AND STARTSWITH(c.Path, @prefix) AND IS_NULL(c.Deleted) ORDER BY c.Path OFFSET 0 LIMIT @pageSize")
+            .WithParameter("@repo", "Chain")
+            .WithParameter("@prefix", "/config/")
+            .WithParameter("@pageSize", 2);
+
+        var page1 = new List<dynamic>();
+        using var it1 = container.GetItemQueryIterator<dynamic>(page1Query,
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("Chain") });
+        while (it1.HasMoreResults)
+        {
+            var resp = await it1.ReadNextAsync();
+            page1.AddRange(resp);
+        }
+
+        page1.Count.ShouldBe(2);
+        ((string)page1[0].Path).ShouldBe("/config/item-a");
+        ((string)page1[1].Path).ShouldBe("/config/item-b");
+
+        // Page 2: OFFSET 2 LIMIT 2
+        var page2Query = new QueryDefinition(
+            "SELECT c.Path, c.Hash FROM c WHERE c.Repo = @repo AND STARTSWITH(c.Path, @prefix) AND IS_NULL(c.Deleted) ORDER BY c.Path OFFSET @offset LIMIT @pageSize")
+            .WithParameter("@repo", "Chain")
+            .WithParameter("@prefix", "/config/")
+            .WithParameter("@offset", 2)
+            .WithParameter("@pageSize", 2);
+
+        var page2 = new List<dynamic>();
+        using var it2 = container.GetItemQueryIterator<dynamic>(page2Query,
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("Chain") });
+        while (it2.HasMoreResults)
+        {
+            var resp = await it2.ReadNextAsync();
+            page2.AddRange(resp);
+        }
+
+        page2.Count.ShouldBe(2);
+        ((string)page2[0].Path).ShouldBe("/config/item-c");
+        ((string)page2[1].Path).ShouldBe("/config/item-d");
+
+        // Page 3: OFFSET 4 LIMIT 2 — should return only 1
+        var page3Query = new QueryDefinition(
+            "SELECT c.Path, c.Hash FROM c WHERE c.Repo = @repo AND STARTSWITH(c.Path, @prefix) AND IS_NULL(c.Deleted) ORDER BY c.Path OFFSET @offset LIMIT @pageSize")
+            .WithParameter("@repo", "Chain")
+            .WithParameter("@prefix", "/config/")
+            .WithParameter("@offset", 4)
+            .WithParameter("@pageSize", 2);
+
+        var page3 = new List<dynamic>();
+        using var it3 = container.GetItemQueryIterator<dynamic>(page3Query,
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("Chain") });
+        while (it3.HasMoreResults)
+        {
+            var resp = await it3.ReadNextAsync();
+            page3.AddRange(resp);
+        }
+
+        page3.Count.ShouldBe(1);
+        ((string)page3[0].Path).ShouldBe("/config/item-e");
+    }
+
     private async Task<Container> CreateTempContainer()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";

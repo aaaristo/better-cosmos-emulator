@@ -380,9 +380,11 @@ public class SqliteQueryTranslator
     private string TranslateIsNull(Expression arg)
     {
         // For IS_NULL we need to distinguish between "column is NULL" (undefined)
-        // and "JSON value is null". Use json_extract on body to check json null.
+        // and "JSON value is null". Use json_type with two args directly on body —
+        // json_type(json_extract(...)) doesn't work because json_extract converts
+        // JSON null to SQL NULL, then json_type(SQL NULL) returns NULL, not 'null'.
         var jsonPath = GetPropertyJsonPath(arg);
-        return $"(json_type(json_extract(body, '$.{jsonPath}')) = 'null')";
+        return $"(json_type(body, '$.{jsonPath}') = 'null')";
     }
 
     private string TranslateArrayContains(List<Expression> arguments)
