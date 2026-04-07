@@ -136,6 +136,66 @@ dotnet test tests/Cosmos.Emulator.Tests.Integration
 
 90 integration tests covering all features using the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider (`IsETagConcurrency`, bracket notation, `= null` syntax).
 
+## Benchmarks
+
+Compare performance against the official Cosmos DB emulators:
+
+```bash
+# Start the emulators (better-cosmos-emulator on 8081, official on 8082, vnext on 8083)
+dotnet run --project src/Cosmos.Emulator.Api
+docker run -d -p 8082:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+docker run -d -p 8083:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+
+# Run benchmark against all reachable endpoints
+dotnet run --project benchmarks/Cosmos.Emulator.Benchmarks.csproj
+
+# Run against specific endpoints
+dotnet run --project benchmarks/Cosmos.Emulator.Benchmarks.csproj -- \
+  --endpoint "Better=https://localhost:8081" \
+  --endpoint "Official=https://localhost:8082"
+
+# Run against a single target
+dotnet run --project benchmarks/Cosmos.Emulator.Benchmarks.csproj -- --only "Better"
+```
+
+Measures: database/container creation, 100-doc insert, point read, upsert, queries (filter, ORDER BY, COUNT, GROUP BY), change feed drain, and 100-doc delete.
+
+### Results (Docker, Windows 11, same host)
+
+| Operation | Better Emulator | VNext Preview | Official Emulator |
+|---|--:|--:|--:|
+| Create database | 140 ms | 103 ms | 882 ms |
+| Create container | 65 ms | 59 ms | 701 ms |
+| Insert 100 docs | **668 ms** | 613 ms | 1363 ms |
+| Point read | **2.2 ms** | 3.5 ms | 4.8 ms |
+| Upsert | **4.5 ms** | 5.7 ms | 12.0 ms |
+| Query: WHERE | **7.5 ms** | 9.8 ms | 11.2 ms |
+| Query: ORDER BY + LIMIT | **4.4 ms** | 6.0 ms | 8.8 ms |
+| Query: COUNT | **2.5 ms** | 6.0 ms | 6.3 ms |
+| Query: GROUP BY | **3.1 ms** | 5.7 ms | 6.5 ms |
+| Change feed drain | 49 ms | **48 ms** | 70 ms |
+| Delete 100 docs | 413 ms | 511 ms | 1141 ms |
+| **TOTAL** | **1360 ms** | 1370 ms | 4206 ms |
+
+### At scale (10,000 docs, parallelism=50)
+
+| Operation | Better Emulator | VNext Preview | Official Emulator |
+|---|--:|--:|--:|
+| Insert 10k docs | 27.8 s | **16.7 s** | 20.6 s |
+| Point read | **2.9 ms** | 2.7 ms | 4.7 ms |
+| Upsert | **4.7 ms** | 5.2 ms | 9.8 ms |
+| Query: WHERE (5k hits) | 296 ms | 386 ms | **291 ms** |
+| Query: ORDER BY + LIMIT 10 | 24 ms | 22 ms | **6.9 ms** |
+| Query: COUNT | **3.9 ms** | 17 ms | 5.9 ms |
+| Query: GROUP BY | **5.9 ms** | 21 ms | 6.1 ms |
+| Change feed drain 10k | **1.1 s** | 2.7 s | 2.1 s |
+| Delete 10k docs | 29.8 s | **11.5 s** | 20.2 s |
+| **TOTAL** | 59.2 s | **31.5 s** | 44.7 s |
+
+At 100 docs the better emulator is **3x faster** than the official emulator and tied with VNext. At 10k docs, VNext pulls ahead on bulk writes/deletes (Rust gateway), but the better emulator has the fastest change feed drain and aggregate queries. The official emulator is slowest overall at both scales.
+
+SQLite's single-writer lock is the bottleneck for parallel inserts/deletes — sequential writes are fast but don't benefit from parallelism as much as the other emulators.
+
 ## Limitations
 
 - **Auth** — accepts any valid-looking Authorization header (no HMAC-SHA256 validation)
