@@ -189,6 +189,53 @@ public class DocumentTests
         etagValue.ShouldBe("updated-etag-value");
     }
 
+    [Fact]
+    public async Task ConcurrentReadsAndWrites_ShouldNotBlock()
+    {
+        var container = await CreateTempContainer();
+
+        // Seed one document so reads have something to find
+        await container.CreateItemAsync(
+            new { id = "seed", partitionKey = "pk1", name = "Seed" },
+            new PartitionKey("pk1"));
+
+        // Launch 50 parallel writes and 50 parallel reads simultaneously
+        var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var writeErrors = 0;
+        var readErrors = 0;
+        var writeCount = 0;
+        var readCount = 0;
+
+        var writes = Enumerable.Range(0, 50).Select(async i =>
+        {
+            try
+            {
+                await container.CreateItemAsync(
+                    new { id = $"w-{i}", partitionKey = "pk1", name = $"Write-{i}" },
+                    new PartitionKey("pk1"));
+                Interlocked.Increment(ref writeCount);
+            }
+            catch { Interlocked.Increment(ref writeErrors); }
+        });
+
+        var reads = Enumerable.Range(0, 50).Select(async i =>
+        {
+            try
+            {
+                await container.ReadItemAsync<dynamic>("seed", new PartitionKey("pk1"));
+                Interlocked.Increment(ref readCount);
+            }
+            catch { Interlocked.Increment(ref readErrors); }
+        });
+
+        await Task.WhenAll(writes.Concat(reads));
+
+        writeCount.ShouldBe(50);
+        readCount.ShouldBe(50);
+        writeErrors.ShouldBe(0);
+        readErrors.ShouldBe(0);
+    }
+
     private async Task<Container> CreateTempContainer()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";
