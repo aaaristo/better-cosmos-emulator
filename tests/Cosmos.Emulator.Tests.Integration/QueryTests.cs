@@ -297,6 +297,25 @@ public class QueryTests
         ((string)r2[0].name).ShouldBe("Deleted");
     }
 
+    [Fact]
+    public async Task SelectDistinctValue_ShouldReturnUniqueScalars()
+    {
+        var container = await SeedTestData();
+
+        var query = new QueryDefinition("SELECT DISTINCT VALUE c.city FROM c");
+        var results = new List<string>();
+        using var iterator = container.GetItemQueryIterator<string>(query);
+        while (iterator.HasMoreResults)
+        {
+            var page = await iterator.ReadNextAsync();
+            results.AddRange(page);
+        }
+
+        results.Count.ShouldBe(2);
+        results.ShouldContain("Seattle");
+        results.ShouldContain("Portland");
+    }
+
     private async Task<Container> SeedTestData()
     {
         var container = await CreateTempContainer();
