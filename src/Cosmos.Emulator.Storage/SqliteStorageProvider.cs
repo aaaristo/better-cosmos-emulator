@@ -20,6 +20,7 @@ internal class DatabaseWriter : IDisposable
         _conn = new SqliteConnection(connectionString);
         _conn.Open();
         using var cmd = _conn.CreateCommand();
+        // WAL + synchronous=NORMAL for performance.
         cmd.CommandText = inMemory
             ? "PRAGMA foreign_keys=ON;"
             : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;";
@@ -127,8 +128,8 @@ public class SqliteStorageProvider
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = _inMemory
-            ? "PRAGMA foreign_keys=ON;"
-            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
+            ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;"
+            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
         cmd.ExecuteNonQuery();
         return conn;
     }
@@ -179,8 +180,8 @@ public class SqliteStorageProvider
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = _inMemory
-            ? "PRAGMA foreign_keys=ON;"
-            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;";
+            ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;"
+            : "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
         cmd.ExecuteNonQuery();
         return conn;
     }

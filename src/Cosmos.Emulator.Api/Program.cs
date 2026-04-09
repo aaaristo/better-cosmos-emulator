@@ -61,16 +61,12 @@ var app = builder.Build();
 // Initialize storage
 app.Services.GetRequiredService<SqliteStorageProvider>().Initialize();
 
-// Global error handler — catch unhandled exceptions and return 500
+// Global error handler
 app.Use(async (context, next) =>
 {
-    try
-    {
-        await next();
-    }
+    try { await next(); }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"[ERROR] {context.Request.Method} {context.Request.Path}: {ex.Message}");
         if (!context.Response.HasStarted)
         {
             context.Response.StatusCode = 500;
@@ -80,17 +76,33 @@ app.Use(async (context, next) =>
     }
 });
 
-// Strip charset from Content-Type to match official emulator (application/json, not application/json; charset=utf-8)
+// Buffer responses to use Content-Length instead of chunked transfer encoding.
+// EF Core's Cosmos provider hangs reading chunked response bodies under concurrent load.
 app.Use(async (context, next) =>
 {
-    context.Response.OnStarting(() =>
+    // Swap the response body with a MemoryStream to capture the full response
+    var originalBody = context.Response.Body;
+    var buffer = new MemoryStream();
+    context.Response.Body = buffer;
+
+    try
     {
+        await next();
+    }
+    finally
+    {
+        // Strip charset from Content-Type to match official emulator
         var ct = context.Response.ContentType;
         if (ct != null && ct.Contains("charset"))
             context.Response.ContentType = "application/json";
-        return Task.CompletedTask;
-    });
-    await next();
+
+        // Write the buffered response with Content-Length
+        context.Response.Body = originalBody;
+        context.Response.ContentLength = buffer.Length;
+        buffer.Position = 0;
+        await buffer.CopyToAsync(originalBody);
+        await buffer.DisposeAsync();
+    }
 });
 
 // Middleware

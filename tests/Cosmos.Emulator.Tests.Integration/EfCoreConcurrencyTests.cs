@@ -135,6 +135,80 @@ public class EfCoreConcurrencyTests
             node.Value.ShouldBe("v3");
         }
     }
+
+    [Fact(Timeout = 15000)]
+    public async Task EfCore_TakeWithManyItems_ShouldNotLoopForever()
+    {
+        // Regression: EF Core's Take(1000) generates OFFSET 0 LIMIT @p.
+        // The emulator was returning continuation tokens causing ToListAsync() to loop.
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        await _fixture.Client.CreateDatabaseAsync(dbName);
+
+        var endpoint = _fixture.Client.Endpoint.ToString();
+        var options = new DbContextOptionsBuilder<TestBatchContext>()
+            .UseCosmos(endpoint,
+                "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==",
+                dbName,
+                cosmosOptions =>
+                {
+                    cosmosOptions.ConnectionMode(ConnectionMode.Gateway);
+                    cosmosOptions.LimitToEndpoint();
+                    cosmosOptions.HttpClientFactory(() => new HttpClient(new HttpClientHandler
+                    {
+                        ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+                    }));
+                })
+            .Options;
+
+        // Create container and seed 150 items
+        await using (var ctx = new TestBatchContext(options))
+        {
+            await ctx.Database.EnsureCreatedAsync();
+            for (int i = 0; i < 150; i++)
+            {
+                ctx.Items.Add(new TestBatchItem
+                {
+                    Id = $"item-{i:D4}",
+                    Partition = "pk1",
+                    Name = $"Item {i}"
+                });
+            }
+            await ctx.SaveChangesAsync();
+        }
+
+        // This is the exact pattern from PromoteBatchActivity:
+        // _batchContext.SyncObjects.Where(o => o.Repo == partition).Take(1000).ToListAsync()
+        await using (var ctx = new TestBatchContext(options))
+        {
+            var items = await ctx.Items
+                .Where(i => i.Partition == "pk1")
+                .Take(1000)
+                .ToListAsync();
+
+            items.Count.ShouldBe(150);
+        }
+    }
+}
+
+public class TestBatchItem
+{
+    public string Id { get; set; } = null!;
+    public string Partition { get; set; } = null!;
+    public string Name { get; set; } = null!;
+}
+
+public class TestBatchContext : DbContext
+{
+    public TestBatchContext(DbContextOptions<TestBatchContext> options) : base(options) { }
+    public DbSet<TestBatchItem> Items => Set<TestBatchItem>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        var entity = modelBuilder.Entity<TestBatchItem>();
+        entity.ToContainer("TestBatchItems");
+        entity.HasPartitionKey(i => i.Partition);
+        entity.HasKey(i => i.Id);
+    }
 }
 
 public class TestNode

@@ -316,6 +316,104 @@ public class QueryTests
         results.ShouldContain("Portland");
     }
 
+    [Fact(Timeout = 15000)]
+    public async Task SelectDistinctValue_DotNotation_ConcurrentWithWrites_ShouldNotHang()
+    {
+        // Exact production pattern: SELECT DISTINCT VALUE c.Repo FROM c
+        // while concurrent writes are happening to the same container
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"test-coll-{Guid.NewGuid():N}", "/Repo")).Container;
+
+        // Seed some data across partitions
+        for (int i = 0; i < 20; i++)
+        {
+            var repo = i % 3 == 0 ? "Chain" : i % 3 == 1 ? "AMA001" : "AMA002";
+            await container.CreateItemAsync(
+                new { id = $"item-{i}", Repo = repo, Path = $"/data/{i}" },
+                new PartitionKey(repo));
+        }
+
+        // Start concurrent writes
+        var writeCts = new CancellationTokenSource();
+        var writeTask = Task.Run(async () =>
+        {
+            int idx = 100;
+            while (!writeCts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    await container.UpsertItemAsync(
+                        new { id = $"write-{idx % 20}", Repo = "AMA001", Path = $"/write/{idx}" },
+                        new PartitionKey("AMA001"));
+                    idx++;
+                }
+                catch { }
+            }
+        });
+
+        // Run the DISTINCT VALUE query multiple times while writes happen
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            var query = new QueryDefinition("SELECT DISTINCT VALUE c.Repo FROM c");
+            var results = new List<string>();
+            using var iterator = container.GetItemQueryIterator<string>(query);
+            while (iterator.HasMoreResults)
+            {
+                var page = await iterator.ReadNextAsync();
+                results.AddRange(page);
+            }
+
+            results.Count.ShouldBeGreaterThanOrEqualTo(2);
+            results.ShouldContain("Chain");
+            results.ShouldContain("AMA001");
+        }
+
+        writeCts.Cancel();
+        await writeTask;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task QueryWithOwnLimit_ShouldNotLoopForever()
+    {
+        // Regression: EF Core's Take(1000) generates OFFSET 0 LIMIT @p with @p=1000
+        // AND sets x-ms-max-item-count to 1000.
+        // The emulator saw results.Count == maxItems (1000 == 1000) and set a continuation
+        // token. The SDK followed the continuation, but the query has its own OFFSET 0 so
+        // the same 1000 results came back every time — infinite loop.
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        var container = (await db.CreateContainerAsync($"test-coll-{Guid.NewGuid():N}", "/partitionKey")).Container;
+
+        // Insert exactly 1000 items — matches the LIMIT, triggering the bug
+        for (int i = 0; i < 1000; i++)
+        {
+            await container.CreateItemAsync(
+                new { id = $"item-{i:D4}", partitionKey = "pk1", name = $"Item {i}" },
+                new PartitionKey("pk1"));
+        }
+
+        // EF Core pattern: OFFSET 0 LIMIT 1000, MaxItemCount=1000
+        var query = new QueryDefinition("SELECT VALUE c FROM root c OFFSET 0 LIMIT @p")
+            .WithParameter("@p", 1000);
+
+        var results = new List<dynamic>();
+        int pageCount = 0;
+        using var iterator = container.GetItemQueryIterator<dynamic>(query,
+            requestOptions: new QueryRequestOptions { MaxItemCount = 1000 });
+        while (iterator.HasMoreResults)
+        {
+            var page = await iterator.ReadNextAsync();
+            results.AddRange(page);
+            pageCount++;
+            if (pageCount > 3)
+                throw new Exception($"Infinite paging: {pageCount} pages, {results.Count} results");
+        }
+
+        results.Count.ShouldBe(1000);
+        pageCount.ShouldBe(1);
+    }
+
     private async Task<Container> SeedTestData()
     {
         var container = await CreateTempContainer();

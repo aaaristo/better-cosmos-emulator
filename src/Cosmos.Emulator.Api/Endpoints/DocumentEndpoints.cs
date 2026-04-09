@@ -31,7 +31,6 @@ public static class DocumentEndpoints
             return Results.Json(new { code = "NotFound", message = $"Container '{collId}' not found." }, statusCode: 404);
 
         // Query plan request: the SDK asks "how should I execute this query?"
-        // We return a simple plan telling the SDK to execute it as a single-partition passthrough.
         var isQueryPlanRequest = context.Request.Headers["x-ms-cosmos-is-query-plan-request"]
             .FirstOrDefault()?.Equals("True", StringComparison.OrdinalIgnoreCase) == true;
         if (isQueryPlanRequest)
@@ -176,7 +175,9 @@ public static class DocumentEndpoints
                 catch { }
             }
 
-            if (!sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase))
+            // Only apply server-side pagination if the query doesn't already have LIMIT
+            var hasOwnLimit = sql.Contains("LIMIT", StringComparison.OrdinalIgnoreCase);
+            if (!hasOwnLimit)
             {
                 sql += $" LIMIT {maxItems}";
                 if (queryOffset > 0)
@@ -187,7 +188,10 @@ public static class DocumentEndpoints
 
             context.Response.Headers["x-ms-item-count"] = results.Count.ToString();
 
-            if (results.Count == maxItems)
+            // Only set continuation if WE added the LIMIT (server-side pagination).
+            // If the query has its own LIMIT (e.g., EF Core's Take(1000)), don't paginate —
+            // returning a continuation token causes the SDK to loop forever.
+            if (!hasOwnLimit && results.Count == maxItems)
             {
                 var nextToken = Convert.ToBase64String(
                     JsonSerializer.SerializeToUtf8Bytes(new { offset = queryOffset + maxItems }));
@@ -211,7 +215,7 @@ public static class DocumentEndpoints
         }
     }
 
-    private static IResult HandleDocumentList(
+    private static async Task<IResult> HandleDocumentList(
         string dbId, string collId, HttpContext context,
         DatabaseRepository dbRepo, ContainerRepository containerRepo,
         DocumentRepository docRepo, ChangeFeedRepository cfRepo)
@@ -224,8 +228,6 @@ public static class DocumentEndpoints
             return Results.Json(new { code = "NotFound", message = $"Container '{collId}' not found." }, statusCode: 404);
 
         // Check for change feed request
-        // LatestVersion uses "A-IM: Incremental Feed"
-        // AllVersionsAndDeletes uses "A-IM: Full-Fidelity Feed"
         var aim = context.Request.Headers["A-IM"].FirstOrDefault();
         if (aim is not null && (aim.Contains("Incremental", StringComparison.OrdinalIgnoreCase)
                              || aim.Contains("Full-Fidelity", StringComparison.OrdinalIgnoreCase)))
@@ -450,7 +452,7 @@ public static class DocumentEndpoints
             Ts = ts
         };
 
-        docRepo.Replace(dbId, collId, document);
+        await docRepo.ReplaceAsync(dbId, collId, document);
 
         context.Response.Headers["etag"] = etag;
         return Results.Json(enrichedBody);
@@ -558,7 +560,7 @@ public static class DocumentEndpoints
             Ts = ts
         };
 
-        docRepo.Replace(dbId, collId, document);
+        await docRepo.ReplaceAsync(dbId, collId, document);
 
         context.Response.Headers["etag"] = etag;
         return Results.Json(patchedBody);
