@@ -315,6 +315,62 @@ public class ChangeFeedTests
         ((string)newChanges[0].Path).ShouldBe("/data/item-1");
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task LatestVersionChangeFeed_ConcurrentWithWrites_ShouldNotHang()
+    {
+        var container = await CreateTempContainer();
+
+        // Seed some initial data
+        for (int i = 0; i < 10; i++)
+            await container.CreateItemAsync(
+                new { id = $"seed-{i}", partitionKey = "pk1", name = $"Seed-{i}" },
+                new PartitionKey("pk1"));
+
+        // Start 20 parallel writes
+        var writeCts = new CancellationTokenSource();
+        var writeCount = 0;
+        var writeTask = Task.Run(async () =>
+        {
+            var idx = 0;
+            while (!writeCts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    await container.UpsertItemAsync(
+                        new { id = $"concurrent-{idx % 50}", partitionKey = "pk1", name = $"Write-{idx}" },
+                        new PartitionKey("pk1"));
+                    Interlocked.Increment(ref writeCount);
+                    idx++;
+                }
+                catch { }
+            }
+        });
+
+        // Simultaneously drain change feed — this must not hang
+        var feedIterator = container.GetChangeFeedIterator<dynamic>(
+            ChangeFeedStartFrom.Beginning(),
+            ChangeFeedMode.LatestVersion,
+            new ChangeFeedRequestOptions { PageSizeHint = 5 });
+
+        var feedCount = 0;
+        var pages = 0;
+        while (feedIterator.HasMoreResults)
+        {
+            var response = await feedIterator.ReadNextAsync();
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                break;
+            feedCount += response.Count;
+            pages++;
+        }
+
+        writeCts.Cancel();
+        await writeTask;
+
+        feedCount.ShouldBeGreaterThanOrEqualTo(10); // at least the seeds
+        pages.ShouldBeGreaterThan(1);
+        writeCount.ShouldBeGreaterThan(0);
+    }
+
     private async Task<Container> CreateTempContainer()
     {
         var dbName = $"test-db-{Guid.NewGuid():N}";
