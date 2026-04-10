@@ -8,6 +8,8 @@ namespace Cosmos.Emulator.Api.Endpoints;
 
 public static class DocumentEndpoints
 {
+    private const int MaxDocumentSizeBytes = 2 * 1024 * 1024; // 2 MB
+
     public static void MapDocumentEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapPost("/dbs/{dbId}/colls/{collId}/docs", HandleDocumentPost);
@@ -55,6 +57,14 @@ public static class DocumentEndpoints
         HttpContext context, DocumentRepository docRepo, ContainerRepository containerRepo)
     {
         var body = await ReadBody(context);
+
+        // Cosmos DB limits documents to 2 MB
+        var bodySize = System.Text.Encoding.UTF8.GetByteCount(body.GetRawText());
+        if (bodySize > MaxDocumentSizeBytes)
+            return Results.Json(new { code = "RequestEntityTooLarge",
+                message = $"Entity with the specified size in the request ({bodySize}) exceeds the maximum entity size ({MaxDocumentSizeBytes}) allowed." },
+                statusCode: 413);
+
         var isUpsert = context.Request.Headers["x-ms-documentdb-is-upsert"].FirstOrDefault()
             ?.Equals("True", StringComparison.OrdinalIgnoreCase) == true;
 
@@ -434,6 +444,13 @@ public static class DocumentEndpoints
             return Results.Json(new { code = "PreconditionFailed", message = "The operation specified an eTag that is different from the version available at the server." }, statusCode: 412);
 
         var body = await ReadBody(context);
+
+        var bodySize = System.Text.Encoding.UTF8.GetByteCount(body.GetRawText());
+        if (bodySize > MaxDocumentSizeBytes)
+            return Results.Json(new { code = "RequestEntityTooLarge",
+                message = $"Entity with the specified size in the request ({bodySize}) exceeds the maximum entity size ({MaxDocumentSizeBytes}) allowed." },
+                statusCode: 413);
+
         var etag = EtagGenerator.Generate();
         var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 

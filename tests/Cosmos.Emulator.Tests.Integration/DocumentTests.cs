@@ -190,6 +190,33 @@ public class DocumentTests
     }
 
     [Fact]
+    public async Task CreateItem_Over2MB_ShouldReturn413()
+    {
+        var container = await CreateTempContainer();
+
+        // Create a document larger than 2 MB
+        var largeString = new string('x', 2 * 1024 * 1024);
+        var item = new { id = "big", partitionKey = "pk1", data = largeString };
+
+        var ex = await Should.ThrowAsync<CosmosException>(
+            () => container.CreateItemAsync(item, new PartitionKey("pk1")));
+        ex.StatusCode.ShouldBe(HttpStatusCode.RequestEntityTooLarge);
+    }
+
+    [Fact]
+    public async Task CreateItem_Under2MB_ShouldSucceed()
+    {
+        var container = await CreateTempContainer();
+
+        // Just under 2 MB
+        var data = new string('x', 1 * 1024 * 1024);
+        var item = new { id = "ok", partitionKey = "pk1", data };
+
+        var response = await container.CreateItemAsync(item, new PartitionKey("pk1"));
+        response.StatusCode.ShouldBe(HttpStatusCode.Created);
+    }
+
+    [Fact]
     public async Task ConcurrentReadsAndWrites_ShouldNotBlock()
     {
         var container = await CreateTempContainer();
