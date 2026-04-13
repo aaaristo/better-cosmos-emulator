@@ -412,7 +412,7 @@ public class SqliteQueryTranslator
             var jsonStr = paramValue?.ToString() ?? "[]";
             try
             {
-                var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonStr);
+                using var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonStr);
                 var inParams = new List<string>();
                 int idx = 0;
                 foreach (var elem in jsonDoc.RootElement.EnumerateArray())

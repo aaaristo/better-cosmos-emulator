@@ -24,7 +24,7 @@ public static class PaginationHelper
             try
             {
                 var tokenBytes = Convert.FromBase64String(continuation);
-                var tokenJson = JsonDocument.Parse(tokenBytes);
+                using var tokenJson = JsonDocument.Parse(tokenBytes);
                 offset = tokenJson.RootElement.GetProperty("offset").GetInt32();
             }
             catch { }

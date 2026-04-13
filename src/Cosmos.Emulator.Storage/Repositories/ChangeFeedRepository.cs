@@ -57,7 +57,7 @@ public class ChangeFeedRepository
                     Id = reader.GetString(0),
                     Rid = reader.GetString(1),
                     PartitionKey = reader.GetString(2),
-                    Body = JsonDocument.Parse(reader.GetString(3)).RootElement.Clone(),
+                    Body = JsonParse(reader.GetString(3)),
                     Etag = reader.GetString(4),
                     Ts = reader.GetInt64(5),
                     IsDeleted = reader.GetInt32(6) != 0,
@@ -113,8 +113,8 @@ public class ChangeFeedRepository
                     DocumentId = reader.GetString(1),
                     PartitionKey = reader.GetString(2),
                     Operation = reader.GetString(3),
-                    Body = reader.IsDBNull(4) ? null : JsonDocument.Parse(reader.GetString(4)).RootElement.Clone(),
-                    PreviousBody = reader.IsDBNull(5) ? null : JsonDocument.Parse(reader.GetString(5)).RootElement.Clone(),
+                    Body = reader.IsDBNull(4) ? null : JsonParse(reader.GetString(4)),
+                    PreviousBody = reader.IsDBNull(5) ? null : JsonParse(reader.GetString(5)),
                     Ts = reader.GetInt64(6),
                     Etag = reader.GetString(7)
                 });
@@ -135,6 +135,12 @@ public class ChangeFeedRepository
             cmd.Parameters.AddWithValue("@id", containerId);
             return (long)(cmd.ExecuteScalar() ?? 0L);
         });
+    }
+
+    private static JsonElement JsonParse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
     }
 
     private static string QuoteName(string name) => $"[{name.Replace("]", "]]")}]";

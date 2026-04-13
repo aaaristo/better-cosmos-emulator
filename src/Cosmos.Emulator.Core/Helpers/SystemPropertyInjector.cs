@@ -21,7 +21,7 @@ public static class SystemPropertyInjector
         node["_ts"] = ts;
         node["_attachments"] = attachments;
 
-        return JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
+        return JsonParse(node.ToJsonString());
     }
 
     public static JsonElement UpdateSystemProperties(
@@ -34,6 +34,12 @@ public static class SystemPropertyInjector
         node["_etag"] = etag;
         node["_ts"] = ts;
 
-        return JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
+        return JsonParse(node.ToJsonString());
+    }
+
+    private static JsonElement JsonParse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
     }
 }

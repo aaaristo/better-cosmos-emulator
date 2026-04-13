@@ -67,7 +67,7 @@ public class DocumentRepository
         long offset = 0;
         if (continuationToken is not null)
         {
-            var tokenJson = JsonDocument.Parse(Convert.FromBase64String(continuationToken));
+            using var tokenJson = JsonDocument.Parse(Convert.FromBase64String(continuationToken));
             offset = tokenJson.RootElement.GetProperty("offset").GetInt64();
         }
 
@@ -311,7 +311,7 @@ public class DocumentRepository
         while (reader.Read())
         {
             var json = reader.GetString(0);
-            result.Add(JsonDocument.Parse(json).RootElement.Clone());
+            result.Add(JsonParse(json));
         }
         return result;
     }
@@ -467,12 +467,18 @@ public class DocumentRepository
         Id = reader.GetString(0),
         Rid = reader.GetString(1),
         PartitionKey = reader.GetString(2),
-        Body = JsonDocument.Parse(reader.GetString(3)).RootElement.Clone(),
+        Body = JsonParse(reader.GetString(3)),
         Etag = reader.GetString(4),
         Ts = reader.GetInt64(5),
         IsDeleted = reader.GetInt32(6) != 0,
         Lsn = reader.GetInt64(7)
     };
+
+    private static JsonElement JsonParse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
+    }
 
     private static string Q(string name) => SchemaInitializer.QuoteName(name);
 }

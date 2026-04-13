@@ -179,7 +179,7 @@ public static class DocumentEndpoints
                 try
                 {
                     var tokenBytes = Convert.FromBase64String(queryContinuation);
-                    var tokenJson = JsonDocument.Parse(tokenBytes);
+                    using var tokenJson = JsonDocument.Parse(tokenBytes);
                     queryOffset = tokenJson.RootElement.GetProperty("offset").GetInt32();
                 }
                 catch { }
@@ -271,7 +271,7 @@ public static class DocumentEndpoints
             long nextOffset = 0;
             if (continuation is not null)
             {
-                var tokenJson = JsonDocument.Parse(Convert.FromBase64String(continuation));
+                using var tokenJson = JsonDocument.Parse(Convert.FromBase64String(continuation));
                 nextOffset = tokenJson.RootElement.GetProperty("offset").GetInt64();
             }
             nextOffset += maxItems;
@@ -318,7 +318,7 @@ public static class DocumentEndpoints
             try
             {
                 var tokenBytes = Convert.FromBase64String(ifNoneMatch.Trim('"'));
-                var tokenJson = JsonDocument.Parse(tokenBytes);
+                using var tokenJson = JsonDocument.Parse(tokenBytes);
                 afterLsn = tokenJson.RootElement.GetProperty("lsn").GetInt64();
             }
             catch
@@ -565,7 +565,7 @@ public static class DocumentEndpoints
         node["_etag"] = etag;
         node["_ts"] = ts;
 
-        var patchedBody = JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
+        var patchedBody = JsonParse(node.ToJsonString());
 
         var document = new CosmosDocument
         {
@@ -1073,6 +1073,12 @@ public static class DocumentEndpoints
     private static async Task<JsonElement> ReadBody(HttpContext context)
     {
         using var doc = await JsonDocument.ParseAsync(context.Request.Body);
+        return doc.RootElement.Clone();
+    }
+
+    private static JsonElement JsonParse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
     }
 }
