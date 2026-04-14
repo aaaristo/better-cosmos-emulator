@@ -97,8 +97,6 @@ public class DocumentRepository
     {
         return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
-            using var tx = conn.BeginTransaction();
-
             var newLsn = IncrementLsn(conn, containerId);
             document.Lsn = newLsn;
 
@@ -134,7 +132,6 @@ public class DocumentRepository
             InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
                 "create", document.Body.GetRawText(), null, document.Ts, document.Etag);
 
-            tx.Commit();
             return (document, newLsn);
         });
     }
@@ -146,8 +143,6 @@ public class DocumentRepository
     {
         return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
-            using var tx = conn.BeginTransaction();
-
             var prevBody = GetCurrentBody(conn, containerId, document.Id, document.PartitionKey);
 
             var newLsn = IncrementLsn(conn, containerId);
@@ -187,7 +182,6 @@ public class DocumentRepository
             InsertChangeFeedEntry(conn, containerId, document.Id, document.PartitionKey,
                 "replace", document.Body.GetRawText(), prevBody, document.Ts, document.Etag);
 
-            tx.Commit();
             return (document, newLsn);
         });
     }
@@ -199,8 +193,6 @@ public class DocumentRepository
     {
         return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
-            using var tx = conn.BeginTransaction();
-
             var prevBody = GetCurrentBody(conn, containerId, documentId, partitionKey);
 
             var newLsn = IncrementLsn(conn, containerId);
@@ -216,7 +208,6 @@ public class DocumentRepository
             InsertChangeFeedEntry(conn, containerId, documentId, partitionKey,
                 "delete", null, prevBody, ts, "", ttlExpired);
 
-            tx.Commit();
             return newLsn;
         });
     }

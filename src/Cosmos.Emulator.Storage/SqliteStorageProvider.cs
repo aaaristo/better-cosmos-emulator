@@ -45,9 +45,41 @@ internal class DatabaseWriter : IDisposable
 
     private async Task ProcessLoop()
     {
+        var batch = new List<WriteCommand>(64);
+
         await foreach (var cmd in _channel.Reader.ReadAllAsync())
         {
-            cmd.Execute(_conn);
+            batch.Add(cmd);
+            // Drain all immediately available writes into the batch
+            while (_channel.Reader.TryRead(out var more))
+                batch.Add(more);
+
+            // Wrap all writes in a single transaction — one fsync for the whole batch.
+            // For single writes this is equivalent to before (one tx per write).
+            // For bursts this amortizes the fsync across many writes.
+            using var tx = _conn.BeginTransaction();
+            try
+            {
+                foreach (var c in batch)
+                    c.Execute(_conn);
+                tx.Commit();
+            }
+            catch
+            {
+                // Batch failed — rollback and re-execute individually
+                // so one bad write doesn't fail the whole batch
+                try { tx.Rollback(); } catch { }
+                foreach (var c in batch)
+                {
+                    if (!c.IsCompleted)
+                    {
+                        using var individualTx = _conn.BeginTransaction();
+                        try { c.Execute(_conn); individualTx.Commit(); }
+                        catch { try { individualTx.Rollback(); } catch { } }
+                    }
+                }
+            }
+            batch.Clear();
         }
     }
 
@@ -61,6 +93,7 @@ internal class DatabaseWriter : IDisposable
 
 internal abstract class WriteCommand
 {
+    public abstract bool IsCompleted { get; }
     public abstract void Execute(SqliteConnection conn);
 }
 
@@ -71,6 +104,7 @@ internal class WriteCommand<T> : WriteCommand
 
     public WriteCommand(Func<SqliteConnection, T> action) => _action = action;
     public Task<T> Task => _tcs.Task;
+    public override bool IsCompleted => _tcs.Task.IsCompleted;
 
     public override void Execute(SqliteConnection conn)
     {
