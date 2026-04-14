@@ -6,7 +6,7 @@ A lightweight, SQLite-backed Azure Cosmos DB emulator for local development and 
 
 The official Cosmos DB emulator is heavy, Windows-only (Linux Docker image is limited), and lacks features like the AllVersionsAndDeletes change feed mode. This emulator is:
 
-- **Fast** — starts in milliseconds, runs 90 tests in under 5 seconds
+- **Fast** — starts in milliseconds, runs 98 tests in under 5 seconds
 - **Lightweight** — single .NET process, SQLite storage, no Docker required
 - **Feature-rich** — indexing, change feed (both modes), PATCH, JOIN, TTL, full SQL query engine
 - **SDK-compatible** — tested against the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider
@@ -134,7 +134,7 @@ Document  →  Row with hybrid columns:
 dotnet test tests/Cosmos.Emulator.Tests.Integration
 ```
 
-90 integration tests covering all features using the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider (`IsETagConcurrency`, bracket notation, `= null` syntax).
+98 integration tests covering all features using the official `Microsoft.Azure.Cosmos` SDK and EF Core Cosmos provider (`IsETagConcurrency`, bracket notation, `= null` syntax, concurrent reads+writes).
 
 ## Benchmarks
 
@@ -181,18 +181,18 @@ Measures: database/container creation, 100-doc insert, point read, upsert, queri
 
 | Operation | Better Emulator | VNext Preview | Official Emulator |
 |---|--:|--:|--:|
-| Insert 10k docs | **5.1 s** | 16.7 s | 20.6 s |
-| Point read | **1.7 ms** | 2.7 ms | 4.7 ms |
-| Upsert | **2.5 ms** | 5.2 ms | 9.8 ms |
-| Query: WHERE (5k hits) | 659 ms | 386 ms | **291 ms** |
-| Query: ORDER BY + LIMIT 10 | 40 ms | 22 ms | **6.9 ms** |
-| Query: COUNT | **9.2 ms** | 17 ms | 5.9 ms |
-| Query: GROUP BY | **11.7 ms** | 21 ms | 6.1 ms |
-| Change feed drain 10k | **735 ms** | 2.7 s | 2.1 s |
-| Delete 10k docs | **3.1 s** | 11.5 s | 20.2 s |
-| **TOTAL** | **10.2 s** | 31.5 s | 44.7 s |
+| Insert 10k docs | **1.5 s** | 16.7 s | 20.6 s |
+| Point read | **1.2 ms** | 2.7 ms | 4.7 ms |
+| Upsert | **1.2 ms** | 5.2 ms | 9.8 ms |
+| Query: WHERE (5k hits) | 584 ms | 386 ms | **291 ms** |
+| Query: ORDER BY + LIMIT 10 | 29 ms | 22 ms | **6.9 ms** |
+| Query: COUNT | **6.7 ms** | 17 ms | 5.9 ms |
+| Query: GROUP BY | **8.2 ms** | 21 ms | 6.1 ms |
+| Change feed drain 10k | **563 ms** | 2.7 s | 2.1 s |
+| Delete 10k docs | **0.9 s** | 11.5 s | 20.2 s |
+| **TOTAL** | **3.8 s** | 31.5 s | 44.7 s |
 
-The better emulator is **3x faster** than VNext and **4x faster** than the official emulator at 10k docs. Writes use a dedicated writer channel (single persistent SQLite connection per database) that eliminates WAL lock acquisition overhead — making parallel inserts/deletes 5-10x faster than naive connection-per-request.
+The better emulator is **8x faster** than VNext and **12x faster** than the official emulator at 10k docs. Writes use a dedicated writer channel with batch transactions — concurrent writes are drained from a channel and committed in a single SQLite transaction, amortizing the fsync cost across many writes.
 
 ## Limitations
 
