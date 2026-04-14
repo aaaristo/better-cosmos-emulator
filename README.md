@@ -26,6 +26,13 @@ dotnet run --project src/Cosmos.Emulator.Api -- --data /path/to/data --port 9999
 ### Docker
 
 ```bash
+docker pull aaaristo/better-cosmos-emulator
+docker run -p 8081:8081 -v cosmos-data:/data aaaristo/better-cosmos-emulator
+```
+
+Or build locally:
+
+```bash
 docker build -t better-cosmos-emulator .
 docker run -p 8081:8081 -v cosmos-data:/data better-cosmos-emulator
 ```
