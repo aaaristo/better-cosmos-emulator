@@ -18,8 +18,14 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      - name: Check resolved SDK version
+        run: |
+          dotnet list tests/Cosmos.Emulator.Tests.Integration package --include-transitive | grep -i cosmos
+          find tests/Cosmos.Emulator.Tests.Integration/bin -name "Microsoft.Azure.Cosmos.Client.dll" -exec dotnet tool run --tool-path . file {} \; 2>/dev/null || true
+          dotnet build tests/Cosmos.Emulator.Tests.Integration -c Release -v minimal
+          ls -la tests/Cosmos.Emulator.Tests.Integration/bin/Release/net10.0/Microsoft.Azure.Cosmos*.dll 2>/dev/null || echo "no cosmos dll in output"
       - name: Run tests
-        run: dotnet test tests/Cosmos.Emulator.Tests.Integration --configuration Release
+        run: dotnet test tests/Cosmos.Emulator.Tests.Integration --configuration Release --no-build
 
   docker:
     needs: test
