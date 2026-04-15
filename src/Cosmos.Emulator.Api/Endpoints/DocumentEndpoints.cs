@@ -935,96 +935,25 @@ public static class DocumentEndpoints
         var body = await ReadBody(context);
         var queryText = body.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
 
-        var upperQuery = queryText.ToUpperInvariant();
-        var hasOrderBy = upperQuery.Contains("ORDER BY");
-        var hasDistinct = upperQuery.Contains("DISTINCT");
-        var hasSelectValue = upperQuery.Contains("SELECT VALUE");
-        var hasTop = upperQuery.Contains("TOP ");
-        var hasOffset = upperQuery.Contains("OFFSET");
-        var hasGroupBy = upperQuery.Contains("GROUP BY");
-        var hasAggregate = upperQuery.Contains("COUNT(") || upperQuery.Contains("SUM(")
-                        || upperQuery.Contains("AVG(") || upperQuery.Contains("MIN(") || upperQuery.Contains("MAX(");
-
-        var rewrittenQuery = queryText;
-        var orderByDirections = Array.Empty<string>();
-        var orderByExpressions = Array.Empty<string>();
-
-        if (hasOrderBy)
-        {
-            // Extract the alias from FROM clause (e.g., "FROM root c" -> "c", "FROM c" -> "c")
-            var fromMatch = System.Text.RegularExpressions.Regex.Match(
-                queryText, @"\bFROM\s+\w+\s+(\w+)\b|\bFROM\s+(\w+)\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            var alias = fromMatch.Groups[1].Success ? fromMatch.Groups[1].Value
-                      : fromMatch.Groups[2].Success ? fromMatch.Groups[2].Value : "c";
-
-            // Extract ORDER BY expressions and directions
-            var orderByMatch = System.Text.RegularExpressions.Regex.Match(
-                queryText, @"ORDER\s+BY\s+(.+?)(?:\s+OFFSET\b|\s+$|$)",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            if (orderByMatch.Success)
-            {
-                var orderByClause = orderByMatch.Groups[1].Value.Trim();
-                var orderByParts = SplitOrderByParts(orderByClause);
-                var directions = new List<string>();
-                var expressions = new List<string>();
-                var orderByItems = new List<string>();
-
-                foreach (var part in orderByParts)
-                {
-                    var trimmed = part.Trim();
-                    string expr;
-                    string dir;
-                    if (trimmed.EndsWith(" DESC", StringComparison.OrdinalIgnoreCase))
-                    {
-                        expr = trimmed[..^5].Trim();
-                        dir = "Descending";
-                    }
-                    else if (trimmed.EndsWith(" ASC", StringComparison.OrdinalIgnoreCase))
-                    {
-                        expr = trimmed[..^4].Trim();
-                        dir = "Ascending";
-                    }
-                    else
-                    {
-                        expr = trimmed;
-                        dir = "Ascending";
-                    }
-                    directions.Add(dir);
-                    expressions.Add(expr);
-                    orderByItems.Add($"{{\"item\": {expr}}}");
-                }
-
-                orderByDirections = directions.ToArray();
-                orderByExpressions = expressions.ToArray();
-
-                // Rewrite: SELECT ... FROM -> SELECT alias._rid, [{orderByItems}] AS orderByItems, alias AS payload FROM
-                var selectMatch = System.Text.RegularExpressions.Regex.Match(
-                    queryText, @"^(SELECT\s+(?:DISTINCT\s+)?(?:VALUE\s+)?)(.*?)\s+(FROM\b)",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline);
-                if (selectMatch.Success)
-                {
-                    var orderByItemsStr = string.Join(", ", orderByItems);
-                    rewrittenQuery = $"SELECT {alias}._rid, [{orderByItemsStr}] AS orderByItems, {alias} AS payload "
-                                   + queryText[selectMatch.Groups[3].Index..];
-                }
-            }
-        }
-
+        // Return a passthrough query plan — the emulator handles all query features
+        // (ORDER BY, aggregates, DISTINCT, GROUP BY, OFFSET/LIMIT) server-side in SQLite.
+        // We tell the SDK there's nothing special about this query so it sends it as-is
+        // and doesn't try to do client-side ORDER BY or aggregate processing.
+        // This avoids format mismatches between SDK versions.
         var queryInfo = new Dictionary<string, object?>
         {
-            ["distinctType"] = hasDistinct ? "Ordered" : "None",
+            ["distinctType"] = "None",
             ["top"] = null,
             ["offset"] = null,
             ["limit"] = null,
-            ["orderBy"] = orderByDirections,
-            ["orderByExpressions"] = orderByExpressions,
+            ["orderBy"] = Array.Empty<string>(),
+            ["orderByExpressions"] = Array.Empty<string>(),
             ["groupByExpressions"] = Array.Empty<string>(),
             ["groupByAliases"] = Array.Empty<string>(),
-            ["aggregates"] = hasAggregate && !hasOrderBy ? new[] { "Count" } : Array.Empty<string>(),
+            ["aggregates"] = Array.Empty<string>(),
             ["groupByAliasToAggregateType"] = new Dictionary<string, string>(),
-            ["rewrittenQuery"] = rewrittenQuery,
-            ["hasSelectValue"] = hasSelectValue && !hasOrderBy,
+            ["rewrittenQuery"] = queryText,
+            ["hasSelectValue"] = queryText.Contains("SELECT VALUE", StringComparison.OrdinalIgnoreCase),
         };
 
         var plan = new Dictionary<string, object>
@@ -1046,29 +975,6 @@ public static class DocumentEndpoints
         return Results.Json(plan);
     }
 
-    /// <summary>
-    /// Splits ORDER BY clause parts on commas, but respects brackets and parentheses.
-    /// e.g., "c[\"Deleted\"], c.name DESC" -> ["c[\"Deleted\"]", "c.name DESC"]
-    /// </summary>
-    private static List<string> SplitOrderByParts(string orderByClause)
-    {
-        var parts = new List<string>();
-        int depth = 0;
-        int start = 0;
-        for (int i = 0; i < orderByClause.Length; i++)
-        {
-            var ch = orderByClause[i];
-            if (ch == '(' || ch == '[') depth++;
-            else if (ch == ')' || ch == ']') depth--;
-            else if (ch == ',' && depth == 0)
-            {
-                parts.Add(orderByClause[start..i]);
-                start = i + 1;
-            }
-        }
-        parts.Add(orderByClause[start..]);
-        return parts;
-    }
 
     private static async Task<JsonElement> ReadBody(HttpContext context)
     {
