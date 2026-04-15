@@ -208,7 +208,6 @@ The better emulator is **8x faster** than VNext and **12x faster** than the offi
 - **Single partition** — all data in one partition key range per container (no physical partitioning)
 - **No stored procedures, triggers, or UDFs**
 - **No geo-replication or consistency levels** (always session consistency)
-- **SDK version** — tested with `Microsoft.Azure.Cosmos` 3.59.0-preview.0 and EF Core Cosmos 10.0. Older SDKs (3.41–3.42 via EF Core 8) may hit issues with query plan rewriting for ORDER BY and aggregate queries due to differences in how older SDKs format rewritten queries
 
 ## License
 
