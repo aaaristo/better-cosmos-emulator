@@ -18,7 +18,10 @@ public class SqliteQueryTranslator
     private readonly HashSet<string> _knownColumns;
     private readonly Dictionary<string, object> _parameters = new();
     private readonly Dictionary<string, int> _joinAliases = new(StringComparer.OrdinalIgnoreCase);
+    // Subquery array-iteration aliases (e.g. "o" in "FROM o IN c.items") → json_each table alias
+    private readonly Dictionary<string, string> _iterAliases = new(StringComparer.OrdinalIgnoreCase);
     private int _paramCounter;
+    private int _subCounter;
 
     // Cosmos system properties (_rid, _etag, _ts) map to SQLite columns without underscore prefix
     private static readonly Dictionary<string, string> SystemPropertyToColumn = new(StringComparer.OrdinalIgnoreCase)
@@ -187,6 +190,7 @@ public class SqliteQueryTranslator
         ArrayIndexAccess aia => TranslateArrayIndex(aia),
         ObjectExpression obj => TranslateObject(obj),
         ArrayExpression arr => TranslateArray(arr),
+        ExistsExpression ee => TranslateExists(ee),
         SelectStar => "body",
         _ => throw new NotSupportedException($"Expression type {expr.GetType().Name} not supported")
     };
@@ -195,6 +199,21 @@ public class SqliteQueryTranslator
     {
         // Check if the first path segment is a JOIN alias (e.g., "t" in "t.name" from JOIN t IN c.tags)
         var firstSegment = pa.Path.Count > 0 ? pa.Path[0] : pa.Source;
+
+        // Subquery array-iteration alias (e.g., "o" in "o.value" from "FROM o IN c.items")
+        if (firstSegment is not null && _iterAliases.TryGetValue(firstSegment, out var iterTable))
+        {
+            var iterRemaining = pa.Path.Count > 0 && pa.Path[0].Equals(firstSegment, StringComparison.OrdinalIgnoreCase)
+                ? pa.Path.Skip(1).ToList()
+                : pa.Path;
+
+            if (iterRemaining.Count == 0)
+                return $"{iterTable}.value"; // the element itself (scalar or object)
+
+            var iterJsonPath = "$." + string.Join(".", iterRemaining.Select(EscapeJsonPath));
+            return $"json_extract({iterTable}.value, '{iterJsonPath}')";
+        }
+
         if (firstSegment is not null && _joinAliases.TryGetValue(firstSegment, out var joinIdx))
         {
             var tableAlias = $"__j{joinIdx}";
@@ -252,23 +271,11 @@ public class SqliteQueryTranslator
 
     private string TranslateArrayIndex(ArrayIndexAccess aia)
     {
-        // c["Deleted"] → treat as property access c.Deleted (bracket notation for property access)
-        // EF Core Cosmos provider uses this syntax: c["PropertyName"]
-        // Double-quoted identifiers are tokenized as Identifier → parsed as PropertyAccess
-        if (aia.Array is PropertyAccess pa)
-        {
-            string? propName = null;
-            if (aia.Index is LiteralExpression { Type: LiteralType.String } strIdx)
-                propName = strIdx.Value?.ToString();
-            else if (aia.Index is PropertyAccess indexPa && indexPa.Source is null && indexPa.Path.Count == 1)
-                propName = indexPa.Path[0]; // double-quoted identifier like c["Deleted"]
-
-            if (propName is not null)
-            {
-                var syntheticPa = new PropertyAccess(pa.Source, [.. pa.Path, propName]);
-                return TranslatePropertyAccess(syntheticPa);
-            }
-        }
+        // c["Deleted"] or nested c["Owner"]["Name"] → treat as property access.
+        // EF Core's Cosmos provider uses bracket notation for property access, including
+        // chained brackets for nested owned/complex types (c["Ocid"]["Value"]).
+        if (TryResolveBracketPropertyAccess(aia, out var bracketPa))
+            return TranslatePropertyAccess(bracketPa);
 
         // c.tags[0] → json_extract(body, '$.tags[0]')
         if (aia.Array is PropertyAccess pa2 && aia.Index is LiteralExpression { Type: LiteralType.Number } idx)
@@ -407,37 +414,11 @@ public class SqliteQueryTranslator
         // When the array is a parameter (e.g., ARRAY_CONTAINS(@pathsToLookup, c["Path"])),
         // SQLite's json_each() doesn't work with bound parameters. Instead, resolve the
         // parameter value and expand it to an IN clause with individual parameters.
-        if (arrayExpr is ParameterExpression paramExpr && _parameters.TryGetValue(paramExpr.Name, out var paramValue))
+        if (arrayExpr is ParameterExpression paramExpr && ExpandArrayParameter(paramExpr.Name) is { } inParams)
         {
-            var jsonStr = paramValue?.ToString() ?? "[]";
-            try
-            {
-                using var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonStr);
-                var inParams = new List<string>();
-                int idx = 0;
-                foreach (var elem in jsonDoc.RootElement.EnumerateArray())
-                {
-                    var pName = $"@__ac_{_paramCounter++}";
-                    _parameters[pName] = elem.ValueKind switch
-                    {
-                        System.Text.Json.JsonValueKind.String => elem.GetString()!,
-                        System.Text.Json.JsonValueKind.Number when elem.TryGetInt64(out var l) => l,
-                        System.Text.Json.JsonValueKind.Number => elem.GetDouble(),
-                        _ => elem.GetRawText()
-                    };
-                    inParams.Add(pName);
-                    idx++;
-                }
-                // Remove the original array parameter — it's no longer needed
-                _parameters.Remove(paramExpr.Name);
-                if (inParams.Count == 0)
-                    return "0"; // empty array → always false
-                return $"({valueExpr} IN ({string.Join(", ", inParams)}))";
-            }
-            catch
-            {
-                // Fall through to json_each approach if parsing fails
-            }
+            if (inParams.Count == 0)
+                return "0"; // empty array → always false
+            return $"({valueExpr} IN ({string.Join(", ", inParams)}))";
         }
 
         // For document-level arrays (e.g., ARRAY_CONTAINS(c.tags, "value")),
@@ -494,9 +475,108 @@ public class SqliteQueryTranslator
     private string TranslateIn(InExpression ine)
     {
         var value = TranslateExpression(ine.Value);
-        var items = string.Join(", ", ine.List.Select(TranslateExpression));
         var not = ine.Negated ? "NOT " : "";
+
+        // EF Core can pass an entire collection as a single array-valued parameter:
+        //   c["Ocid"]["Value"] IN (@__ocids_0)
+        // SQLite can't match against a bound array, so expand it into individual parameters.
+        if (ine.List.Count == 1 && ine.List[0] is ParameterExpression p
+            && ExpandArrayParameter(p.Name) is { } expanded)
+        {
+            if (expanded.Count == 0)
+                return ine.Negated ? "1" : "0"; // empty set: NOT IN → always true, IN → always false
+            return $"({value} {not}IN ({string.Join(", ", expanded)}))";
+        }
+
+        var items = string.Join(", ", ine.List.Select(TranslateExpression));
         return $"({value} {not}IN ({items}))";
+    }
+
+    /// <summary>
+    /// EXISTS (SELECT ... FROM x IN &lt;collection&gt; WHERE ...) → correlated SQLite EXISTS over
+    /// json_each(). Used for EF Core's parameterized-collection .Contains() translation, e.g.
+    /// ocids.Contains(c.Ocid.Value) → EXISTS (SELECT VALUE 1 FROM o IN @ocids WHERE o = c["Ocid"]["Value"]).
+    /// </summary>
+    private string TranslateExists(ExistsExpression ee)
+    {
+        var sub = ee.Subquery;
+        if (sub.FromSource is null)
+            throw new NotSupportedException(
+                "EXISTS is only supported with array iteration: EXISTS (SELECT ... FROM x IN <collection> WHERE ...)");
+
+        string arraySource;
+        if (sub.FromSource is ParameterExpression paramExpr && _parameters.TryGetValue(paramExpr.Name, out var paramValue))
+        {
+            // json_each() can't bind parameters, so inline the array's JSON text as a literal.
+            var jsonStr = paramValue?.ToString() ?? "[]";
+            _parameters.Remove(paramExpr.Name);
+            arraySource = $"json_each('{EscapeSqlString(jsonStr)}')";
+        }
+        else
+        {
+            // Embedded document array — json_extract(body, ...) etc. is fine inside json_each().
+            arraySource = $"json_each({TranslateExpression(sub.FromSource)})";
+        }
+
+        var tableAlias = $"__s{_subCounter++}";
+        _iterAliases[sub.FromAlias] = tableAlias;
+        try
+        {
+            var sb = new StringBuilder();
+            sb.Append($"EXISTS (SELECT 1 FROM {arraySource} AS {tableAlias}");
+            if (sub.Where is not null)
+            {
+                sb.Append(" WHERE ");
+                sb.Append(TranslateExpression(sub.Where));
+            }
+            sb.Append(')');
+            return sb.ToString();
+        }
+        finally
+        {
+            _iterAliases.Remove(sub.FromAlias);
+        }
+    }
+
+    /// <summary>
+    /// Expands an array-valued parameter into individual bound parameters, returning their names.
+    /// Returns null when the parameter is absent or not a JSON array (so callers fall back to
+    /// normal handling). SQLite's IN and json_each() cannot bind a single array parameter.
+    /// </summary>
+    private List<string>? ExpandArrayParameter(string paramName)
+    {
+        if (!_parameters.TryGetValue(paramName, out var paramValue))
+            return null;
+        var jsonStr = paramValue?.ToString() ?? "";
+        try
+        {
+            using var jsonDoc = System.Text.Json.JsonDocument.Parse(jsonStr);
+            if (jsonDoc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+                return null;
+
+            var names = new List<string>();
+            foreach (var elem in jsonDoc.RootElement.EnumerateArray())
+            {
+                var pName = $"@__ax_{_paramCounter++}";
+                _parameters[pName] = elem.ValueKind switch
+                {
+                    System.Text.Json.JsonValueKind.String => elem.GetString()!,
+                    System.Text.Json.JsonValueKind.Number when elem.TryGetInt64(out var l) => l,
+                    System.Text.Json.JsonValueKind.Number => elem.GetDouble(),
+                    System.Text.Json.JsonValueKind.True => 1L,
+                    System.Text.Json.JsonValueKind.False => 0L,
+                    _ => elem.GetRawText()
+                };
+                names.Add(pName);
+            }
+            // The original array parameter is no longer referenced in the SQL.
+            _parameters.Remove(paramName);
+            return names;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private string TranslateBetween(BetweenExpression be)
@@ -528,9 +608,41 @@ public class SqliteQueryTranslator
     private static string GetExpressionAlias(Expression expr) => expr switch
     {
         PropertyAccess pa => pa.Path.Last(),
+        ArrayIndexAccess aia when TryResolveBracketPropertyAccess(aia, out var pa) => pa.Path.Last(),
         FunctionCall fn => fn.Name.ToLowerInvariant(),
         _ => "$1"
     };
+
+    /// <summary>
+    /// Collapses a chain of string-keyed bracket accesses (EF Core notation) into a single
+    /// PropertyAccess. Handles both single (c["Name"]) and nested (c["Owner"]["Name"]) forms.
+    /// Returns false for numeric indexing (c.tags[0]) — that's a real array element access.
+    /// </summary>
+    private static bool TryResolveBracketPropertyAccess(ArrayIndexAccess aia, out PropertyAccess result)
+    {
+        result = null!;
+
+        // Extract the string key from the index, if it is one.
+        string? key = null;
+        if (aia.Index is LiteralExpression { Type: LiteralType.String } strIdx)
+            key = strIdx.Value?.ToString();
+        else if (aia.Index is PropertyAccess { Source: null, Path: { Count: 1 } } idxPa)
+            key = idxPa.Path[0]; // double-quoted identifier tokenized as a bare property
+        if (key is null)
+            return false;
+
+        if (aia.Array is PropertyAccess basePa)
+        {
+            result = new PropertyAccess(basePa.Source, [.. basePa.Path, key]);
+            return true;
+        }
+        if (aia.Array is ArrayIndexAccess innerAia && TryResolveBracketPropertyAccess(innerAia, out var innerPa))
+        {
+            result = new PropertyAccess(innerPa.Source, [.. innerPa.Path, key]);
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Resolves an expression to an integer for OFFSET/LIMIT.

@@ -62,6 +62,7 @@ public class CosmosSqlParser
 
         Expect(TokenType.From);
         var fromAlias = Expect(TokenType.Identifier).Value;
+        Expression? fromSource = null;
 
         // Handle "FROM root c", "FROM root AS c", or just "FROM c"
         // In Cosmos SQL, "root" is a keyword meaning the container.
@@ -72,6 +73,13 @@ public class CosmosSqlParser
             else if (Current.Type == TokenType.Identifier)
                 fromAlias = Expect(TokenType.Identifier).Value;
             // else: "FROM root" alone — "root" IS the alias
+        }
+        else if (Match(TokenType.In))
+        {
+            // "FROM x IN <collection>" — array iteration over an embedded collection
+            // or a parameter array. Used inside subqueries, e.g.
+            // EXISTS (SELECT VALUE 1 FROM o IN c.items WHERE o = c.x).
+            fromSource = ParsePostfix();
         }
         else if (Match(TokenType.As))
         {
@@ -130,7 +138,7 @@ public class CosmosSqlParser
             limit = ParsePrimary();
         }
 
-        return new SelectStatement(isDistinct, top, isValue, selectItems, fromAlias, joins, where, orderBy, offset, limit, groupBy, having);
+        return new SelectStatement(isDistinct, top, isValue, selectItems, fromAlias, joins, where, orderBy, offset, limit, groupBy, having, fromSource);
     }
 
     private List<SelectItem> ParseSelectList()

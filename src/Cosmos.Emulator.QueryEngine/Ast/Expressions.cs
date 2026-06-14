@@ -14,7 +14,8 @@ public record SelectStatement(
     Expression? Offset,
     Expression? Limit,
     List<Expression>? GroupBy,
-    Expression? Having) : Expression;
+    Expression? Having,
+    Expression? FromSource = null) : Expression;
 
 public record JoinClause(string Alias, Expression InExpression);
 

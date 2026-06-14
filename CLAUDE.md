@@ -53,6 +53,10 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 - JSON object literals: `SELECT {"name": c.name, "age": c.age} FROM c`
 - JSON array literals: `SELECT [c.name, c.age] FROM c`
 - JOIN (intra-document arrays): `SELECT t FROM c JOIN t IN c.tags`
+- Subquery array iteration: `FROM x IN c.items` (also over a parameter array)
+- EXISTS subqueries: `EXISTS (SELECT VALUE 1 FROM o IN c.items WHERE o.x = c.y)` — translated to a correlated `EXISTS (SELECT 1 FROM json_each(...) ...)`
+- Nested bracket notation: `c["Owner"]["Name"]` → `$.Owner.Name` (chained EF Core bracket access)
+- Array-valued IN parameters: `c.x IN (@arr)` where `@arr` is a JSON array — expanded to individual bound params
 - Parameterized queries (@param)
 - Cross-partition queries
 - Bracket notation: `c["PropertyName"]` (EF Core Cosmos provider syntax)
@@ -124,6 +128,7 @@ EF Core's Cosmos provider generates queries differently from direct SDK usage:
 - **Parameterized OFFSET/LIMIT**: `OFFSET 0 LIMIT @p` — parameters resolved at translation time
 - **`ARRAY_CONTAINS(@param, c["Path"])`**: Array parameter expanded to `IN (@p0, @p1, ...)` because SQLite's `json_each()` doesn't work with bound parameters
 - **`SELECT VALUE c`**: Returns `body` directly (not `json_quote(body)`) to avoid wrapping objects as escaped strings
+- **Parameterized `.Contains()` over a nested owned property** (e.g. `ocids.Contains(c.Ocid.Value)` where `ocids` is a client-side `HashSet`): EF Core 10 generates one of two shapes — `c["Ocid"]["Value"] IN (@p)` with the whole collection as a single array-valued parameter, or `EXISTS (SELECT VALUE 1 FROM o IN @p WHERE o = c["Ocid"]["Value"])`. Both are supported: the array parameter is expanded to individual bound params (SQLite can't bind an array to `IN`/`json_each`), nested brackets collapse to a dotted JSON path, and the EXISTS subquery becomes a correlated `EXISTS (SELECT 1 FROM json_each(...) ...)`.
 
 ### SQLite Quirks
 - `json_each()` does NOT work with bound parameters — silently returns 0 rows. Array parameters must be expanded to individual values at translation time.
@@ -163,7 +168,7 @@ tests/
 
 ## Current Test Status
 
-90 integration tests + 2 unit tests. 0 skipped.
+100 integration tests + 7 unit tests. 0 skipped.
 
 ## Debugging Failing Tests
 
