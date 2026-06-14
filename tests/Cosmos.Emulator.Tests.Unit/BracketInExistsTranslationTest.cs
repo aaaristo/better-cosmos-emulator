@@ -121,6 +121,34 @@ public class BracketInExistsTranslationTest
     }
 
     [Fact]
+    public void DateTimePart_ExtractsComponents_AndComparesNumerically()
+    {
+        using var conn = new SqliteConnection("Data Source=:memory:");
+        conn.Open();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE TABLE [c] ([Id] TEXT, is_deleted INTEGER NOT NULL DEFAULT 0, body TEXT);
+                INSERT INTO [c] ([Id],is_deleted,body) VALUES
+                  ('c1',0,'{"Id":"c1","Dob":{"Value":"1960-01-15T00:00:00Z"}}'),
+                  ('c2',0,'{"Id":"c2","Dob":{"Value":"1985-07-09T00:00:00Z"}}');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        var engine = new CosmosSqlQueryEngine();
+        var q = engine.Translate(
+            "SELECT c[\"Id\"] FROM root c WHERE DateTimePart(\"yyyy\", c[\"Dob\"][\"Value\"]) = @y " +
+            "AND DateTimePart(\"mm\", c[\"Dob\"][\"Value\"]) = @m AND DateTimePart(\"dd\", c[\"Dob\"][\"Value\"]) = @d",
+            "c", new HashSet<string> { "Id" },
+            new Dictionary<string, object> { ["@y"] = 1960L, ["@m"] = 1L, ["@d"] = 15L });
+
+        // CAST(strftime(...) AS INTEGER) must compare equal to the numeric parameters.
+        Assert.Contains("CAST(strftime('%Y'", q.Sql);
+        Assert.Equal(new[] { "c1" }, RunIds(conn, q));
+    }
+
+    [Fact]
     public void InClause_WithEmptyArrayParameter_MatchesNothing()
     {
         using var conn = NewSeededDb();

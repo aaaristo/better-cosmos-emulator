@@ -49,6 +49,7 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 - CONTAINS, STARTSWITH, ENDSWITH, IS_DEFINED, IS_NULL, ARRAY_CONTAINS
 - `= null` / `!= null` → translated to IS [NOT] NULL (Cosmos SQL syntactic sugar)
 - String functions (UPPER, LOWER, CONCAT, SUBSTRING, REPLACE, etc.)
+- Date/time functions: `DateTimePart(part, datetime)` (EF Core's `.Year`/`.Month`/`.Day`/etc. → `CAST(strftime(...) AS INTEGER)`), `GetCurrentDateTime()`
 - Coalesce (??) operator
 - JSON object literals: `SELECT {"name": c.name, "age": c.age} FROM c`
 - JSON array literals: `SELECT [c.name, c.age] FROM c`

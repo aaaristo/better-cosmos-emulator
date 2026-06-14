@@ -371,6 +371,10 @@ public class SqliteQueryTranslator
             "SQRT" => $"SQRT({args[0]})",
             "SQUARE" => $"({args[0]} * {args[0]})",
 
+            // Date/time functions
+            "DATETIMEPART" when args.Count >= 2 => TranslateDateTimePart(fn),
+            "GETCURRENTDATETIME" => "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+
             // Type-checking functions
             "IS_DEFINED" => $"({args[0]} IS NOT NULL)",
             "IS_NULL" => TranslateIsNull(fn.Arguments[0]),
@@ -394,6 +398,35 @@ public class SqliteQueryTranslator
 
             _ => throw new NotSupportedException($"Function '{fn.Name}' is not supported")
         };
+    }
+
+    /// <summary>
+    /// DateTimePart(part, datetime) — extracts a component of an ISO 8601 datetime.
+    /// EF Core's Cosmos provider generates this for DateTime.Year/Month/Day/etc.
+    /// </summary>
+    private string TranslateDateTimePart(FunctionCall fn)
+    {
+        if (fn.Arguments[0] is not LiteralExpression { Type: LiteralType.String, Value: string part })
+            throw new NotSupportedException("DateTimePart requires a string literal date part as its first argument");
+
+        // Cosmos accepts several aliases per part; map each to a strftime specifier.
+        var format = part.ToLowerInvariant() switch
+        {
+            "year" or "yyyy" or "yy" => "%Y",
+            "month" or "mm" or "m" => "%m",
+            "day" or "dd" or "d" => "%d",
+            "hour" or "hh" => "%H",
+            "minute" or "mi" or "n" => "%M",
+            "second" or "ss" or "s" => "%S",
+            "dayofyear" or "dy" or "y" => "%j",
+            "weekday" or "dw" or "w" => "%w",
+            _ => throw new NotSupportedException($"DateTimePart '{part}' is not supported")
+        };
+
+        var value = TranslateExpression(fn.Arguments[1]);
+        // strftime returns text ('1960', '01'); CAST to integer so comparisons against numeric
+        // parameters work — SQLite does not treat '1960' and 1960 as equal.
+        return $"CAST(strftime('{format}', {value}) AS INTEGER)";
     }
 
     private string TranslateIsNull(Expression arg)
