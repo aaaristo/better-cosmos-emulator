@@ -414,6 +414,44 @@ public class QueryTests
         pageCount.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task InvalidQuery_ShouldReturnDiagnosticErrorBody()
+    {
+        // Create a real container, then send the query over raw HTTP — the SDK's query
+        // pipeline hides the response body, but the actual 400 body carries the diagnostics
+        // (and the server logs the full stack trace via ILogger).
+        var dbName = $"test-db-{Guid.NewGuid():N}";
+        var collName = $"test-coll-{Guid.NewGuid():N}";
+        var db = (await _client.CreateDatabaseAsync(dbName)).Database;
+        await db.CreateContainerAsync(collName, "/partitionKey");
+
+        const string badQuery = "SELECT * FROM c WHERE c.city IN"; // parser rejects this
+
+        using var http = new HttpClient(new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+        })
+        { BaseAddress = _client.Endpoint };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/dbs/{dbName}/colls/{collName}/docs")
+        {
+            Content = new StringContent(
+                $"{{\"query\":\"{badQuery}\"}}", System.Text.Encoding.UTF8, "application/query+json")
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", "type=master&ver=1.0&sig=test");
+        request.Headers.TryAddWithoutValidation("x-ms-date", DateTime.UtcNow.ToString("R"));
+
+        var response = await http.SendAsync(request);
+        response.StatusCode.ShouldBe(System.Net.HttpStatusCode.BadRequest);
+
+        var body = await response.Content.ReadAsStringAsync();
+        // The diagnostic body echoes the original statement and how far we got, so the exact
+        // failing query can be recovered without reproducing.
+        body.ShouldContain(badQuery);
+        body.ShouldContain("parse/translation");
+        body.ShouldContain("\"stage\"");
+    }
+
     private async Task<Container> SeedTestData()
     {
         var container = await CreateTempContainer();

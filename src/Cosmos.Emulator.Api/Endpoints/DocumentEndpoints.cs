@@ -23,7 +23,7 @@ public static class DocumentEndpoints
     private static async Task<IResult> HandleDocumentPost(
         string dbId, string collId, HttpContext context,
         DatabaseRepository dbRepo, ContainerRepository containerRepo, DocumentRepository docRepo,
-        CosmosSqlQueryEngine queryEngine)
+        CosmosSqlQueryEngine queryEngine, ILoggerFactory loggerFactory)
     {
         if (!dbRepo.Exists(dbId))
             return Results.Json(new { code = "NotFound", message = $"Database '{dbId}' not found." }, statusCode: 404);
@@ -46,7 +46,7 @@ public static class DocumentEndpoints
 
         if (isQuery)
         {
-            return await HandleQuery(dbId, collId, container, context, docRepo, queryEngine);
+            return await HandleQuery(dbId, collId, container, context, docRepo, queryEngine, loggerFactory);
         }
 
         return await CreateDocument(dbId, collId, container, context, docRepo, containerRepo);
@@ -115,8 +115,10 @@ public static class DocumentEndpoints
 
     private static async Task<IResult> HandleQuery(
         string dbId, string collId, CosmosContainer container,
-        HttpContext context, DocumentRepository docRepo, CosmosSqlQueryEngine queryEngine)
+        HttpContext context, DocumentRepository docRepo, CosmosSqlQueryEngine queryEngine,
+        ILoggerFactory loggerFactory)
     {
+        var logger = loggerFactory.CreateLogger("Cosmos.Emulator.Query");
         var body = await ReadBody(context);
         var queryText = body.GetProperty("query").GetString()!;
 
@@ -147,6 +149,9 @@ public static class DocumentEndpoints
             partitionKey = PartitionKeyExtractor.FromHeader(pkHeader.FirstOrDefault()!);
         }
 
+        // Captured outside the try so the catch can report how far we got (parse vs. execution)
+        // and surface the exact SQL that failed.
+        string? translatedSql = null;
         try
         {
             // All queries — including SDK-rewritten ones with JSON object/array literals —
@@ -154,6 +159,7 @@ public static class DocumentEndpoints
             var knownColumns = docRepo.GetKnownColumns(dbId, collId);
             var translated = queryEngine.Translate(queryText, collId, knownColumns, userParams);
             var sql = translated.Sql;
+            translatedSql = sql;
             var parameters = translated.Parameters;
 
             if (partitionKey is not null)
@@ -217,12 +223,43 @@ public static class DocumentEndpoints
         }
         catch (Exception ex)
         {
+            var stage = translatedSql is null ? "parse/translation" : "SQLite execution";
+            var paramSummary = FormatParametersForLog(userParams);
+
+            // Full server-side detail (including stack trace) so failures like this can be
+            // diagnosed from the emulator logs without reproducing.
+            logger.LogError(ex,
+                "Query failed during {Stage} for {Db}/{Coll}.\n  Cosmos query: {Query}\n  Parameters: {Parameters}\n  Translated SQL: {TranslatedSql}",
+                stage, dbId, collId, queryText, paramSummary, translatedSql ?? "(translation did not complete)");
+
+            // The SDK only surfaces the `message` field to callers, so fold the actionable
+            // detail (stage + original statement) into it — that's what shows up in the
+            // client-side CosmosException. The structured fields below are for raw HTTP
+            // consumers and our own logs.
             return Results.Json(new
             {
                 code = "BadRequest",
-                message = $"Failed to execute query: {ex.Message}"
+                message = $"Failed to execute query during {stage}: {ex.Message} [query: {queryText}]",
+                stage,
+                exceptionType = ex.GetType().Name,
+                query = queryText,
+                translatedSql
             }, statusCode: 400);
         }
+    }
+
+    private static string FormatParametersForLog(Dictionary<string, object>? parameters)
+    {
+        if (parameters is null || parameters.Count == 0)
+            return "(none)";
+
+        return string.Join(", ", parameters.Select(p =>
+        {
+            var value = p.Value?.ToString() ?? "null";
+            if (value.Length > 200)
+                value = value[..200] + "…";
+            return $"{p.Key}={value}";
+        }));
     }
 
     private static async Task<IResult> HandleDocumentList(

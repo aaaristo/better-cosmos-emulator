@@ -168,7 +168,7 @@ tests/
 
 ## Current Test Status
 
-100 integration tests + 7 unit tests. 0 skipped.
+101 integration tests + 7 unit tests. 0 skipped.
 
 ## Debugging Failing Tests
 
@@ -191,6 +191,10 @@ tests/
 - Add `LoggingHandler` as a `DelegatingHandler` in the test fixture's `HttpClientFactory` to log all HTTP requests/responses to a file.
 - Log to a file (not Console.WriteLine) — test runner buffers stdout and you won't see it until the test completes.
 - Check `EmulatorFixture.cs` for the `LoggingHandler` class.
+
+### A query failed — getting the exact statement and stack trace
+- `DocumentEndpoints.HandleQuery` logs every query failure via `ILogger` (category `Cosmos.Emulator.Query`) at Error level, including the original Cosmos query, the parameters, the translated SQLite SQL (or "translation did not complete" if it failed during parsing), and the full exception stack trace. Check the emulator console/log output.
+- The 400 response body also carries `stage` (parse/translation vs. SQLite execution), `query`, and `translatedSql`. Note the .NET SDK's query pipeline hides the raw body — the original statement is also folded into the `message` field, and a raw HTTP client (or the server log) sees the full structured body.
 
 ### Seeing what SQL is generated
 - Add `File.AppendAllText(logPath, $"[SQL] {sql}\n")` before `docRepo.ExecuteQuery()` in `DocumentEndpoints.HandleQuery`.
