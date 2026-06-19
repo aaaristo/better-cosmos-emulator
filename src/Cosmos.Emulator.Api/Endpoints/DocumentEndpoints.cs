@@ -384,13 +384,13 @@ public static class DocumentEndpoints
 
             var items = entries.Select(e => new AllVersionsChangeFeedItem
             {
-                // Delete events carry no body, so surface the document id at the item
-                // level so consumers can tell which document was deleted.
-                Id = e.Operation.Equals("delete", StringComparison.OrdinalIgnoreCase) ? e.DocumentId : null,
                 Current = e.Body,
                 Metadata = new ChangeFeedMetadata
                 {
                     OperationType = e.Operation,
+                    // Delete events carry no body, so surface the document id in the
+                    // metadata so consumers can tell which document was deleted.
+                    Id = e.Operation.Equals("delete", StringComparison.OrdinalIgnoreCase) ? e.DocumentId : null,
                     Lsn = e.Lsn,
                     Crts = e.Ts,
                     TimeToLiveExpired = false

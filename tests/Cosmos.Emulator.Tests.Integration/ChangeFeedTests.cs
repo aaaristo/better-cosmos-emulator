@@ -142,12 +142,12 @@ public class ChangeFeedTests
         // Should have at least create + delete
         allChanges.Count.ShouldBeGreaterThanOrEqualTo(2);
 
-        // The delete event must carry the deleted document's id at the item level,
+        // The delete event must carry the deleted document's id in its metadata,
         // since it has no body for consumers to read the id from.
         var deleteEvent = allChanges.FirstOrDefault(
             c => (string?)c.metadata?.operationType == "delete");
         ((object?)deleteEvent).ShouldNotBeNull();
-        ((string)deleteEvent.id).ShouldBe("1");
+        ((string)deleteEvent.metadata.id).ShouldBe("1");
     }
 
     [Fact]

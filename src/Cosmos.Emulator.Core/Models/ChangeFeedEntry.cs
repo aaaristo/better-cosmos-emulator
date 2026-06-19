@@ -26,10 +26,6 @@ public class ChangeFeedResponse
 
 public class AllVersionsChangeFeedItem
 {
-    [JsonPropertyName("id")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Id { get; set; }
-
     [JsonPropertyName("current")]
     public JsonElement? Current { get; set; }
 
@@ -41,6 +37,10 @@ public class ChangeFeedMetadata
 {
     [JsonPropertyName("operationType")]
     public required string OperationType { get; set; }
+
+    [JsonPropertyName("id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Id { get; set; }
 
     [JsonPropertyName("lsn")]
     public long Lsn { get; set; }
