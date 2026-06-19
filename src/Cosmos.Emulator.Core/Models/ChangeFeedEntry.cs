@@ -26,6 +26,10 @@ public class ChangeFeedResponse
 
 public class AllVersionsChangeFeedItem
 {
+    [JsonPropertyName("id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Id { get; set; }
+
     [JsonPropertyName("current")]
     public JsonElement? Current { get; set; }
 
