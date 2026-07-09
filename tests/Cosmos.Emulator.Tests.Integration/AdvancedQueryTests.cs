@@ -185,6 +185,89 @@ public class AdvancedQueryTests
         ((string)results[0]).ShouldBe("ALICE");
     }
 
+    [Fact]
+    public async Task UpperLower_ShouldFoldAccentedCharacters_Invariant()
+    {
+        var container = await CreateTempContainer();
+        await container.CreateItemAsync(
+            new { id = "1", partitionKey = "pk1", name = "Grütter", city = "café" },
+            new PartitionKey("pk1"));
+
+        // UPPER must fold accented letters (Unicode, culture-invariant), matching real Cosmos.
+        var upper = await Drain(container.GetItemQueryIterator<dynamic>(
+            "SELECT VALUE UPPER(c.name) FROM c"));
+        upper.Count.ShouldBe(1);
+        ((string)upper[0]).ShouldBe("GRÜTTER");
+
+        // LOWER must fold accented letters back down.
+        var lower = await Drain(container.GetItemQueryIterator<dynamic>(
+            "SELECT VALUE LOWER('GRÜTTER') FROM c"));
+        lower.Count.ShouldBe(1);
+        ((string)lower[0]).ShouldBe("grütter");
+
+        // Plain ASCII must still work.
+        var ascii = await Drain(container.GetItemQueryIterator<dynamic>(
+            "SELECT VALUE UPPER('abc') FROM c"));
+        ((string)ascii[0]).ShouldBe("ABC");
+
+        // A REPLACE-after-UPPER accent fold must now match (the real-world query pattern).
+        var replaced = await Drain(container.GetItemQueryIterator<dynamic>(
+            "SELECT VALUE REPLACE(UPPER(c.name), 'Ü', 'U') FROM c"));
+        ((string)replaced[0]).ShouldBe("GRUTTER");
+    }
+
+    [Fact]
+    public async Task StringSearch_ShouldBeCaseSensitiveAndLiteral()
+    {
+        var container = await CreateTempContainer();
+        await container.CreateItemAsync(
+            new { id = "1", partitionKey = "pk1", name = "Hello", text = "a50b", accent = "Grütter" },
+            new PartitionKey("pk1"));
+
+        // CONTAINS is case-SENSITIVE by default (SQLite LIKE would wrongly match 'hello').
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.name, 'Hello') FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.name, 'hello') FROM c")).ShouldBeFalse();
+        // Optional case-insensitive flag.
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.name, 'hello', true) FROM c")).ShouldBeTrue();
+        // ...and it folds Unicode/accents correctly (relies on the invariant UPPER override).
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.accent, 'grÜtter', true) FROM c")).ShouldBeTrue();
+        // Needle wildcards are treated literally, NOT as LIKE wildcards.
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.text, '5_') FROM c")).ShouldBeFalse();
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.text, '50') FROM c")).ShouldBeTrue();
+        // Empty needle -> true (matches Cosmos).
+        (await Scalar<bool>(container, "SELECT VALUE CONTAINS(c.name, '') FROM c")).ShouldBeTrue();
+
+        // STARTSWITH / ENDSWITH: case-sensitive, with optional flag and empty-affix handling.
+        (await Scalar<bool>(container, "SELECT VALUE STARTSWITH(c.name, 'He') FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE STARTSWITH(c.name, 'he') FROM c")).ShouldBeFalse();
+        (await Scalar<bool>(container, "SELECT VALUE STARTSWITH(c.name, 'he', true) FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE STARTSWITH(c.name, '') FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE ENDSWITH(c.name, 'lo') FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE ENDSWITH(c.name, 'LO') FROM c")).ShouldBeFalse();
+        (await Scalar<bool>(container, "SELECT VALUE ENDSWITH(c.name, 'LO', true) FROM c")).ShouldBeTrue();
+        (await Scalar<bool>(container, "SELECT VALUE ENDSWITH(c.name, '') FROM c")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task StringTrimAndMath_ShouldMatchCosmosSemantics()
+    {
+        var container = await CreateTempContainer();
+        await container.CreateItemAsync(
+            new { id = "1", partitionKey = "pk1" },
+            new PartitionKey("pk1"));
+
+        // LTRIM must trim ONLY the left; RTRIM only the right; TRIM both.
+        (await Scalar<string>(container, "SELECT VALUE LTRIM('  ab  ') FROM c")).ShouldBe("ab  ");
+        (await Scalar<string>(container, "SELECT VALUE RTRIM('  ab  ') FROM c")).ShouldBe("  ab");
+        (await Scalar<string>(container, "SELECT VALUE TRIM('  ab  ') FROM c")).ShouldBe("ab");
+
+        // FLOOR / CEILING must round the correct direction for negatives.
+        (await Scalar<double>(container, "SELECT VALUE FLOOR(-2.5) FROM c")).ShouldBe(-3);
+        (await Scalar<double>(container, "SELECT VALUE FLOOR(2.5) FROM c")).ShouldBe(2);
+        (await Scalar<double>(container, "SELECT VALUE CEILING(-2.5) FROM c")).ShouldBe(-2);
+        (await Scalar<double>(container, "SELECT VALUE CEILING(2.5) FROM c")).ShouldBe(3);
+    }
+
     [Fact(Timeout = 10000)]
     public async Task GroupBy_ShouldAggregate()
     {
@@ -227,6 +310,16 @@ public class AdvancedQueryTests
             results.AddRange(page);
         }
         return results;
+    }
+
+    private async Task<T> Scalar<T>(Container container, string sql)
+    {
+        var results = new List<T>();
+        var it = container.GetItemQueryIterator<T>(sql);
+        while (it.HasMoreResults)
+            results.AddRange(await it.ReadNextAsync());
+        results.Count.ShouldBe(1, $"expected exactly one scalar result for: {sql}");
+        return results[0];
     }
 
     private async Task<Container> SeedTestData()

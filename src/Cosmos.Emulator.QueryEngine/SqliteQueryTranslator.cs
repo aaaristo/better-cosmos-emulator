@@ -345,13 +345,14 @@ public class SqliteQueryTranslator
         return fn.Name switch
         {
             // String functions
-            "CONTAINS" when args.Count >= 2 => $"({args[0]} LIKE '%' || {args[1]} || '%')",
-            "STARTSWITH" => $"({args[0]} LIKE {args[1]} || '%')",
-            "ENDSWITH" => $"({args[0]} LIKE '%' || {args[1]})",
+            "CONTAINS" when args.Count >= 2 => TranslateStringSearch(fn, args, StringSearchKind.Contains),
+            "STARTSWITH" when args.Count >= 2 => TranslateStringSearch(fn, args, StringSearchKind.StartsWith),
+            "ENDSWITH" when args.Count >= 2 => TranslateStringSearch(fn, args, StringSearchKind.EndsWith),
             "UPPER" => $"UPPER({args[0]})",
             "LOWER" => $"LOWER({args[0]})",
             "LENGTH" => $"LENGTH({args[0]})",
-            "LTRIM" or "TRIM" => $"TRIM({args[0]})",
+            "TRIM" => $"TRIM({args[0]})",
+            "LTRIM" => $"LTRIM({args[0]})",
             "RTRIM" => $"RTRIM({args[0]})",
             "LEFT" => $"SUBSTR({args[0]}, 1, {args[1]})",
             "RIGHT" => $"SUBSTR({args[0]}, -CAST({args[1]} AS INTEGER))",
@@ -364,8 +365,11 @@ public class SqliteQueryTranslator
 
             // Math functions
             "ABS" => $"ABS({args[0]})",
-            "CEILING" => $"CAST(CASE WHEN {args[0]} = CAST({args[0]} AS INTEGER) THEN {args[0]} ELSE CAST({args[0]} AS INTEGER) + 1 END AS INTEGER)",
-            "FLOOR" => $"CAST({args[0]} AS INTEGER)",
+            // SQLite CAST(x AS INTEGER) truncates toward zero, so it is only FLOOR for non-negative
+            // x. Adjust so negatives round the correct direction to match Cosmos (FLOOR(-2.5) = -3,
+            // CEILING(-2.5) = -2). The (x </> CAST(...)) sub-expression yields 1/0 in SQLite.
+            "CEILING" => $"(CAST({args[0]} AS INTEGER) + ({args[0]} > CAST({args[0]} AS INTEGER)))",
+            "FLOOR" => $"(CAST({args[0]} AS INTEGER) - ({args[0]} < CAST({args[0]} AS INTEGER)))",
             "ROUND" => args.Count == 2 ? $"ROUND({args[0]}, {args[1]})" : $"ROUND({args[0]})",
             "POWER" => $"POWER({args[0]}, {args[1]})",
             "SQRT" => $"SQRT({args[0]})",
@@ -397,6 +401,48 @@ public class SqliteQueryTranslator
             "MAX" => $"MAX({args[0]})",
 
             _ => throw new NotSupportedException($"Function '{fn.Name}' is not supported")
+        };
+    }
+
+    private enum StringSearchKind { Contains, StartsWith, EndsWith }
+
+    /// <summary>
+    /// Translates CONTAINS / STARTSWITH / ENDSWITH.
+    ///
+    /// These must NOT be mapped to SQLite LIKE: LIKE is case-INSENSITIVE for ASCII by default
+    /// (so 'Hello' LIKE '%hello%' is true) and treats '%' and '_' in the needle as wildcards —
+    /// both diverge from Cosmos, whose default is a case-SENSITIVE, literal substring match.
+    /// We use INSTR / SUBSTR instead, which are binary/literal.
+    ///
+    /// Cosmos also accepts an optional trailing boolean for a case-insensitive comparison
+    /// (e.g. CONTAINS(a, b, true)). When that argument is the boolean literal true we fold both
+    /// operands with UPPER — which, after the app-defined override, is Unicode/culture-invariant
+    /// (so accented letters compare correctly). A non-literal flag can't be resolved at translation
+    /// time, so it falls through to the case-sensitive form.
+    /// </summary>
+    private string TranslateStringSearch(FunctionCall fn, List<string> args, StringSearchKind kind)
+    {
+        var caseInsensitive = fn.Arguments.Count >= 3
+            && fn.Arguments[2] is LiteralExpression { Type: LiteralType.Boolean, Value: true };
+
+        var haystack = args[0];
+        var needle = args[1];
+        if (caseInsensitive)
+        {
+            haystack = $"UPPER({haystack})";
+            needle = $"UPPER({needle})";
+        }
+
+        return kind switch
+        {
+            // INSTR(x, '') = 1, so CONTAINS(x, '') = true, matching Cosmos.
+            StringSearchKind.Contains => $"(INSTR({haystack}, {needle}) > 0)",
+            // SUBSTR(x, 1, 0) = '' handles the empty-prefix case correctly.
+            StringSearchKind.StartsWith => $"(SUBSTR({haystack}, 1, LENGTH({needle})) = {needle})",
+            // Anchor from the end via a computed start position; empty needle -> position past the
+            // end -> '' = '' -> true.
+            StringSearchKind.EndsWith => $"(SUBSTR({haystack}, LENGTH({haystack}) - LENGTH({needle}) + 1) = {needle})",
+            _ => throw new NotSupportedException($"String search kind '{kind}' not supported")
         };
     }
 

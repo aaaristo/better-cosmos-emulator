@@ -5,6 +5,25 @@ using Microsoft.Data.Sqlite;
 namespace Cosmos.Emulator.Storage;
 
 /// <summary>
+/// Registers application-defined scalar functions on a SQLite connection.
+/// Notably overrides SQLite's built-in ASCII-only UPPER/LOWER with .NET's
+/// culture-invariant Unicode case folding so that accented characters fold the
+/// same way real Azure Cosmos DB (and the official vnext emulator) does — e.g.
+/// UPPER('Grütter') = 'GRÜTTER'. Must be called on every connection the query
+/// engine executes against, since app-defined functions are per-connection.
+/// </summary>
+internal static class SqliteScalarFunctions
+{
+    public static void Register(SqliteConnection connection)
+    {
+        // Culture-invariant (NOT current-culture) to match Cosmos and avoid the Turkish-i problem.
+        // Returning null for null input preserves Cosmos NULL semantics: UPPER(NULL) = NULL.
+        connection.CreateFunction("UPPER", (string? s) => s?.ToUpperInvariant(), isDeterministic: true);
+        connection.CreateFunction("LOWER", (string? s) => s?.ToLowerInvariant(), isDeterministic: true);
+    }
+}
+
+/// <summary>
 /// Dedicated writer channel for a single SQLite database. All writes go through a single
 /// persistent connection, eliminating WAL lock acquisition overhead. Reads use separate
 /// connections (WAL allows concurrent readers).
@@ -19,6 +38,7 @@ internal class DatabaseWriter : IDisposable
     {
         _conn = new SqliteConnection(connectionString);
         _conn.Open();
+        SqliteScalarFunctions.Register(_conn);
         using var cmd = _conn.CreateCommand();
         // WAL + synchronous=NORMAL for performance.
         cmd.CommandText = inMemory
@@ -149,6 +169,7 @@ public class SqliteStorageProvider
             // Keep a connection alive so the shared in-memory DB persists
             var keep = new SqliteConnection(_catalogConnectionString);
             keep.Open();
+            SqliteScalarFunctions.Register(keep);
             _keepAlive["_catalog"] = keep;
         }
 
@@ -160,6 +181,7 @@ public class SqliteStorageProvider
     {
         var conn = new SqliteConnection(_catalogConnectionString);
         conn.Open();
+        SqliteScalarFunctions.Register(conn);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = _inMemory
             ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;"
@@ -201,6 +223,7 @@ public class SqliteStorageProvider
             {
                 var keep = new SqliteConnection(connStr);
                 keep.Open();
+                SqliteScalarFunctions.Register(keep);
                 _keepAlive[safeName] = keep;
             }
         }
@@ -212,6 +235,7 @@ public class SqliteStorageProvider
 
         var conn = new SqliteConnection(connStr);
         conn.Open();
+        SqliteScalarFunctions.Register(conn);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = _inMemory
             ? "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;"

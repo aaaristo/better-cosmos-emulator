@@ -87,7 +87,31 @@ SELECT {"name": c.name, "score": c.age * 2} FROM c
 SELECT VALUE c.nickname ?? c.name FROM c
 ```
 
-Supported: SELECT, FROM, WHERE, ORDER BY, TOP, OFFSET/LIMIT (parameterized), DISTINCT, GROUP BY, JOIN, VALUE, AS, aggregates (COUNT, SUM, AVG, MIN, MAX), IN, BETWEEN, CONTAINS, STARTSWITH, ENDSWITH, IS_DEFINED, IS_NULL, ARRAY_CONTAINS, UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, REPLACE, ABS, FLOOR, CEILING, ROUND, coalesce (??), `= null`/`!= null`, JSON object/array literals, parameterized queries, bracket notation (`c["prop"]`), `FROM root [AS] alias`.
+**Supported clauses:** SELECT, FROM, WHERE, ORDER BY, TOP, OFFSET/LIMIT (parameterized), DISTINCT, GROUP BY, JOIN, VALUE, AS, IN, BETWEEN, coalesce (`??`), `= null`/`!= null`, JSON object/array literals, parameterized queries, bracket notation (`c["prop"]`), `FROM root [AS] alias`.
+
+**Supported functions:**
+- String: `CONTAINS`, `STARTSWITH`, `ENDSWITH`, `UPPER`, `LOWER`, `LENGTH`, `TRIM`, `LTRIM`, `RTRIM`, `LEFT`, `RIGHT`, `SUBSTRING`, `INDEX_OF`, `REPLACE`, `CONCAT`, `TOSTRING`
+- Math: `ABS`, `FLOOR`, `CEILING`, `ROUND`, `POWER`, `SQRT`, `SQUARE`
+- Type checking: `IS_DEFINED`, `IS_NULL`, `IS_NUMBER`, `IS_STRING`, `IS_BOOL`, `IS_ARRAY`, `IS_OBJECT`
+- Array: `ARRAY_CONTAINS`, `ARRAY_LENGTH`
+- Date/time: `DATETIMEPART`, `GETCURRENTDATETIME`
+- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+
+**Function semantics** — these follow Azure Cosmos DB behavior, not SQLite's:
+- `UPPER`/`LOWER` use Unicode, culture-invariant case folding, so accented letters fold too (`UPPER('Grütter')` = `'GRÜTTER'`).
+- `CONTAINS`/`STARTSWITH`/`ENDSWITH` are case-sensitive and match literally (no `%`/`_` wildcards); each accepts an optional trailing boolean for a case-insensitive (Unicode-aware) comparison, e.g. `CONTAINS(c.name, 'grütter', true)`.
+- `SUBSTRING` and `INDEX_OF` are 0-based; `INDEX_OF` returns `-1` when not found.
+- `FLOOR`/`CEILING` round toward negative/positive infinity (`FLOOR(-2.5)` = `-3`, `CEILING(-2.5)` = `-2`).
+- `LTRIM`/`RTRIM` trim only the left/right side respectively; `TRIM` trims both.
+- String `=`, `!=`, and `ORDER BY` are case-sensitive and ordinal (BINARY collation), matching Cosmos.
+
+**Known edge cases where the emulator still diverges** from Azure Cosmos DB:
+- `TOSTRING` on a boolean yields `"1"`/`"0"` rather than `"true"`/`"false"` (booleans are stored as integers), and numeric formatting may differ from Cosmos.
+- The case-insensitive flag on `CONTAINS`/`STARTSWITH`/`ENDSWITH` is only honored when passed as a boolean **literal** (`true`); a parameter or computed expression falls back to a case-sensitive match.
+- The optional 3rd argument of `INDEX_OF(str, sub, start)` and the extended forms of `SUBSTRING` are not applied — extra arguments are ignored.
+- `LENGTH` counts by SQLite characters; strings containing characters outside the Basic Multilingual Plane (e.g. some emoji) may be counted differently than Cosmos.
+- `CONCAT` propagates SQL `NULL` (an undefined/absent operand makes the whole result `NULL`).
+- Functions not listed above (e.g. `STRINGEQUALS`, `REVERSE`, `REGEXMATCH`) are not implemented and raise an error rather than returning a wrong result.
 
 ### Change Feed
 - **LatestVersion** mode — track inserts and updates
