@@ -279,7 +279,7 @@ public static class DocumentEndpoints
         if (aim is not null && (aim.Contains("Incremental", StringComparison.OrdinalIgnoreCase)
                              || aim.Contains("Full-Fidelity", StringComparison.OrdinalIgnoreCase)))
         {
-            return HandleChangeFeed(dbId, collId, container, context, docRepo, cfRepo);
+            return await HandleChangeFeed(dbId, collId, container, context, docRepo, cfRepo);
         }
 
         // Regular list
@@ -326,7 +326,7 @@ public static class DocumentEndpoints
         });
     }
 
-    private static IResult HandleChangeFeed(
+    private static async Task<IResult> HandleChangeFeed(
         string dbId, string collId, CosmosContainer container,
         HttpContext context, DocumentRepository docRepo, ChangeFeedRepository cfRepo)
     {
@@ -366,11 +366,11 @@ public static class DocumentEndpoints
 
         if (isAllVersions)
         {
-            var entries = cfRepo.ReadAllVersionsAndDeletes(dbId, collId, partitionKey, afterLsn, maxItems);
+            var entries = await cfRepo.ReadAllVersionsAndDeletesAsync(dbId, collId, partitionKey, afterLsn, maxItems);
 
             if (entries.Count == 0)
             {
-                var currentLsn = cfRepo.GetCurrentLsn(dbId, collId);
+                var currentLsn = await cfRepo.GetCurrentLsnAsync(dbId, collId);
                 var emptyToken = CreateContinuationToken(currentLsn, true);
                 context.Response.Headers["etag"] = $"\"{emptyToken}\"";
                 context.Response.Headers["x-ms-item-count"] = "0";
@@ -407,11 +407,11 @@ public static class DocumentEndpoints
         else
         {
             // LatestVersion mode
-            var docs = cfRepo.ReadLatestVersion(dbId, collId, partitionKey, afterLsn, maxItems);
+            var docs = await cfRepo.ReadLatestVersionAsync(dbId, collId, partitionKey, afterLsn, maxItems);
 
             if (docs.Count == 0)
             {
-                var currentLsn = cfRepo.GetCurrentLsn(dbId, collId);
+                var currentLsn = await cfRepo.GetCurrentLsnAsync(dbId, collId);
                 var emptyToken = CreateContinuationToken(currentLsn, false);
                 context.Response.Headers["etag"] = $"\"{emptyToken}\"";
                 context.Response.Headers["x-ms-item-count"] = "0";

@@ -59,6 +59,10 @@ public class DatabaseRepository
         cmd.Parameters.AddWithValue("@ts", database.Ts);
         cmd.ExecuteNonQuery();
 
+        // A newly-inserted database adds a rid->id mapping; drop any cached negative
+        // resolution for this rid so ResolveDatabaseId picks it up.
+        _storage.InvalidateDatabaseIdCache();
+
         // Create the SQLite file for this database and initialize its schema
         using var dbConn = _storage.GetDatabaseConnection(database.Id);
         Schema.SchemaInitializer.InitializeDatabase(dbConn);

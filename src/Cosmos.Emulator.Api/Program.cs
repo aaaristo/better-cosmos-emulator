@@ -16,6 +16,12 @@ var switchMappings = new Dictionary<string, string>
     ["--inmemory"] = "CosmosEmulator:InMemory",
 };
 
+// Ensure a burst of concurrent requests (e.g. many parallel change-feed reads that
+// hit synchronous SQLite) doesn't starve the thread pool while it slowly ramps up
+// ~1-2 threads/sec. Without this, a fan-out of reads can wedge Kestrel into refusing
+// connections until the pool catches up.
+ThreadPool.SetMinThreads(100, 100);
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddCommandLine(args, switchMappings);
 

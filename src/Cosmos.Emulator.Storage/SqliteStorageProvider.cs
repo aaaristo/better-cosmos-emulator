@@ -147,6 +147,13 @@ public class SqliteStorageProvider
 
     private readonly ConcurrentDictionary<string, DatabaseWriter> _writers = new();
 
+    // Caches id/rid -> resolved database id. ResolveDatabaseId is called on every read
+    // and write; without this cache it opens a fresh catalog connection + runs a query
+    // each time, which is a large amount of synchronous SQLite work under load. The
+    // catalog's rid->id mapping is immutable for a given database, so the cache is only
+    // invalidated when databases are created or deleted (see InvalidateDatabaseIdCache).
+    private readonly ConcurrentDictionary<string, string> _dbIdCache = new();
+
     // For in-memory mode, keep one connection per database alive so the shared cache isn't dropped
     private readonly Dictionary<string, SqliteConnection> _keepAlive = new();
 
@@ -196,6 +203,9 @@ public class SqliteStorageProvider
     /// </summary>
     public string ResolveDatabaseId(string idOrRid)
     {
+        if (_dbIdCache.TryGetValue(idOrRid, out var cached))
+            return cached;
+
         using var conn = GetCatalogConnection();
         using var cmd = conn.CreateCommand();
         // SDK replaces / with - in _rid URL paths
@@ -204,8 +214,17 @@ public class SqliteStorageProvider
         cmd.Parameters.AddWithValue("@rid", idOrRid);
         cmd.Parameters.AddWithValue("@rv", ridVariant);
         var result = cmd.ExecuteScalar() as string;
-        return result ?? idOrRid;
+        var resolved = result ?? idOrRid;
+        _dbIdCache[idOrRid] = resolved;
+        return resolved;
     }
+
+    /// <summary>
+    /// Clears the id/rid resolution cache. Called whenever a database is created or
+    /// deleted, since those are the only operations that change the catalog's rid->id
+    /// mapping.
+    /// </summary>
+    public void InvalidateDatabaseIdCache() => _dbIdCache.Clear();
 
     public SqliteConnection GetDatabaseConnection(string databaseId)
     {
@@ -278,6 +297,9 @@ public class SqliteStorageProvider
 
     public void DeleteDatabaseFile(string databaseId)
     {
+        // A deleted database's rid->id mapping is now stale.
+        InvalidateDatabaseIdCache();
+
         var safeName = SanitizeFileName(databaseId);
 
         // Dispose the dedicated writer for this database
