@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Cosmos.Emulator.Core.Helpers;
 using Cosmos.Emulator.Core.Models;
 using Microsoft.Data.Sqlite;
 
@@ -19,12 +20,12 @@ public class ChangeFeedRepository
     /// </summary>
     public List<CosmosDocument> ReadLatestVersion(
         string databaseId, string containerId,
-        string? partitionKey, long afterLsn, int maxItems)
-        => ReadLatestVersionAsync(databaseId, containerId, partitionKey, afterLsn, maxItems).GetAwaiter().GetResult();
+        string? partitionKey, long afterLsn, int maxItems, EpkRange? epkRange = null)
+        => ReadLatestVersionAsync(databaseId, containerId, partitionKey, afterLsn, maxItems, epkRange).GetAwaiter().GetResult();
 
     public Task<List<CosmosDocument>> ReadLatestVersionAsync(
         string databaseId, string containerId,
-        string? partitionKey, long afterLsn, int maxItems)
+        string? partitionKey, long afterLsn, int maxItems, EpkRange? epkRange = null)
     {
         return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
@@ -34,8 +35,14 @@ public class ChangeFeedRepository
             var where = "lsn > @lsn AND is_deleted = 0";
             if (partitionKey is not null)
             {
-                where += " AND partition_key = @pk";
-                cmd.Parameters.AddWithValue("@pk", partitionKey);
+                // A hierarchical container may be read by a prefix of its key components.
+                where += " AND " + PartitionKeyPredicate.BuildSql("partition_key", "@pk");
+                BindPartitionKey(cmd, "@pk", partitionKey);
+            }
+            if (epkRange is { } epk)
+            {
+                where += " AND " + EpkFilter.BuildSql("partition_key", "@epk");
+                EpkFilter.Bind(cmd, "@epk", epk);
             }
 
             cmd.CommandText = $"""
@@ -74,12 +81,12 @@ public class ChangeFeedRepository
     /// </summary>
     public List<ChangeFeedEntry> ReadAllVersionsAndDeletes(
         string databaseId, string containerId,
-        string? partitionKey, long afterLsn, int maxItems)
-        => ReadAllVersionsAndDeletesAsync(databaseId, containerId, partitionKey, afterLsn, maxItems).GetAwaiter().GetResult();
+        string? partitionKey, long afterLsn, int maxItems, EpkRange? epkRange = null)
+        => ReadAllVersionsAndDeletesAsync(databaseId, containerId, partitionKey, afterLsn, maxItems, epkRange).GetAwaiter().GetResult();
 
     public Task<List<ChangeFeedEntry>> ReadAllVersionsAndDeletesAsync(
         string databaseId, string containerId,
-        string? partitionKey, long afterLsn, int maxItems)
+        string? partitionKey, long afterLsn, int maxItems, EpkRange? epkRange = null)
     {
         return _storage.ExecuteWriteAsync(databaseId, conn =>
         {
@@ -89,8 +96,14 @@ public class ChangeFeedRepository
             var where = "lsn > @lsn";
             if (partitionKey is not null)
             {
-                where += " AND partition_key = @pk";
-                cmd.Parameters.AddWithValue("@pk", partitionKey);
+                // A hierarchical container may be read by a prefix of its key components.
+                where += " AND " + PartitionKeyPredicate.BuildSql("partition_key", "@pk");
+                BindPartitionKey(cmd, "@pk", partitionKey);
+            }
+            if (epkRange is { } epk)
+            {
+                where += " AND " + EpkFilter.BuildSql("partition_key", "@epk");
+                EpkFilter.Bind(cmd, "@epk", epk);
             }
 
             cmd.CommandText = $"""
@@ -144,4 +157,15 @@ public class ChangeFeedRepository
     }
 
     private static string QuoteName(string name) => $"[{name.Replace("]", "]]")}]";
+
+    /// <summary>
+    /// Binds the three literals compared by <see cref="PartitionKeyPredicate.BuildSql"/>.
+    /// </summary>
+    private static void BindPartitionKey(SqliteCommand cmd, string paramPrefix, string partitionKey)
+    {
+        var bounds = PartitionKeyPredicate.Compute(partitionKey);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_exact", bounds.Exact);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_lo", bounds.RangeLow);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_hi", bounds.RangeHigh);
+    }
 }

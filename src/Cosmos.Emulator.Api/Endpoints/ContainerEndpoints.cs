@@ -36,12 +36,25 @@ public static class ContainerEndpoints
         PartitionKeyDefinition partitionKey;
         if (body.TryGetProperty("partitionKey", out var pkProp))
         {
-            partitionKey = JsonSerializer.Deserialize<PartitionKeyDefinition>(pkProp.GetRawText())!;
+            try
+            {
+                partitionKey = JsonSerializer.Deserialize<PartitionKeyDefinition>(pkProp.GetRawText())!;
+            }
+            catch (JsonException)
+            {
+                // Notably a 'partitionKey' with no 'paths' at all, which would otherwise
+                // surface as a 500 from the required-member check.
+                return Results.Json(new { code = "BadRequest", message = "The 'partitionKey' property is malformed. It must specify 'paths'." }, statusCode: 400);
+            }
         }
         else
         {
             return Results.Json(new { code = "BadRequest", message = "Missing 'partitionKey' property." }, statusCode: 400);
         }
+
+        var partitionKeyError = ValidatePartitionKeyPaths(partitionKey);
+        if (partitionKeyError is not null)
+            return Results.Json(new { code = "BadRequest", message = partitionKeyError }, statusCode: 400);
 
         // Parse indexing policy (optional, use defaults)
         IndexingPolicy indexingPolicy;
@@ -155,6 +168,26 @@ public static class ContainerEndpoints
 
         containerRepo.Delete(dbId, collId);
         return Results.StatusCode(204);
+    }
+
+    /// <summary>
+    /// Cosmos partitions a container on one path, or on two or three for a hierarchical
+    /// (sub-partitioned) container. Accepting more would produce a container the real
+    /// service could never host, and accepting none would silently funnel every document
+    /// into a single partition key of '[]'.
+    /// </summary>
+    private const int MaxPartitionKeyPaths = 3;
+
+    /// <returns>An error message, or null when the definition is acceptable.</returns>
+    private static string? ValidatePartitionKeyPaths(PartitionKeyDefinition partitionKey)
+    {
+        if (partitionKey.Paths.Count == 0)
+            return "The 'partitionKey' property must specify at least one path.";
+
+        if (partitionKey.Paths.Count > MaxPartitionKeyPaths)
+            return $"Too many partition key paths ({partitionKey.Paths.Count}) specified. A maximum of {MaxPartitionKeyPaths} is allowed.";
+
+        return null;
     }
 
     private static async Task<JsonElement> ReadBody(HttpContext context)

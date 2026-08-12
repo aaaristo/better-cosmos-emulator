@@ -2,6 +2,7 @@ using System.Text.Json;
 using Cosmos.Emulator.Core.Helpers;
 using Cosmos.Emulator.Core.Models;
 using Cosmos.Emulator.QueryEngine;
+using Cosmos.Emulator.Storage;
 using Cosmos.Emulator.Storage.Repositories;
 
 namespace Cosmos.Emulator.Api.Endpoints;
@@ -113,6 +114,29 @@ public static class DocumentEndpoints
         return Results.Json(enrichedBody, statusCode: existing is not null ? 200 : 201);
     }
 
+    /// <summary>
+    /// Reads the effective-partition-key range the SDK uses to scope a read to part of
+    /// a partition key range. This is the only signal sent for a <b>partial</b>
+    /// hierarchical partition key: rather than sending a shortened
+    /// x-ms-documentdb-partitionkey, the SDK hashes the prefix itself and sends
+    /// x-ms-start-epk / x-ms-end-epk.
+    /// </summary>
+    /// <returns>Null when no range is given, or when it spans the whole container —
+    /// in which case filtering would hash every row to exclude nothing.</returns>
+    private static EpkRange? ReadEpkRange(HttpContext context)
+    {
+        var start = context.Request.Headers["x-ms-start-epk"].FirstOrDefault();
+        var end = context.Request.Headers["x-ms-end-epk"].FirstOrDefault();
+
+        if (start is null && end is null)
+            return null;
+
+        if (EffectivePartitionKey.IsFullRange(start, end))
+            return null;
+
+        return new EpkRange(start ?? "", end ?? EffectivePartitionKey.MaxExclusive);
+    }
+
     private static async Task<IResult> HandleQuery(
         string dbId, string collId, CosmosContainer container,
         HttpContext context, DocumentRepository docRepo, CosmosSqlQueryEngine queryEngine,
@@ -149,6 +173,8 @@ public static class DocumentEndpoints
             partitionKey = PartitionKeyExtractor.FromHeader(pkHeader.FirstOrDefault()!);
         }
 
+        var epkRange = ReadEpkRange(context);
+
         // Captured outside the try so the catch can report how far we got (parse vs. execution)
         // and surface the exact SQL that failed.
         string? translatedSql = null;
@@ -164,10 +190,24 @@ public static class DocumentEndpoints
 
             if (partitionKey is not null)
             {
+                // Prefix match, so a hierarchical container can be queried by a
+                // prefix of its key components as well as by the full key.
+                var pkBounds = PartitionKeyPredicate.Compute(partitionKey);
                 sql = sql.Replace(
                     "WHERE is_deleted = 0",
-                    $"WHERE is_deleted = 0 AND partition_key = @__pk");
-                parameters["@__pk"] = partitionKey;
+                    "WHERE is_deleted = 0 AND " + PartitionKeyPredicate.BuildSql("partition_key", "@__pk"));
+                parameters["@__pk_exact"] = pkBounds.Exact;
+                parameters["@__pk_lo"] = pkBounds.RangeLow;
+                parameters["@__pk_hi"] = pkBounds.RangeHigh;
+            }
+
+            if (epkRange is { } epk)
+            {
+                sql = sql.Replace(
+                    "WHERE is_deleted = 0",
+                    "WHERE is_deleted = 0 AND " + EpkFilter.BuildSql("partition_key", "@__epk"));
+                parameters["@__epk_start"] = epk.StartInclusive;
+                parameters["@__epk_end"] = epk.EndExclusive;
             }
 
             // Apply max item count and continuation
@@ -295,9 +335,11 @@ public static class DocumentEndpoints
             partitionKey = PartitionKeyExtractor.FromHeader(pkHeader.FirstOrDefault()!);
         }
 
+        var epkRange = ReadEpkRange(context);
+
         var continuation = context.Request.Headers["x-ms-continuation"].FirstOrDefault();
 
-        var docs = docRepo.List(dbId, collId, partitionKey, maxItems, continuation);
+        var docs = docRepo.List(dbId, collId, partitionKey, maxItems, continuation, epkRange);
         var bodies = docs.Select(d => d.Body).ToList();
 
         context.Response.Headers["x-ms-item-count"] = bodies.Count.ToString();
@@ -342,6 +384,8 @@ public static class DocumentEndpoints
             partitionKey = PartitionKeyExtractor.FromHeader(pkHeader.FirstOrDefault()!);
         }
 
+        var epkRange = ReadEpkRange(context);
+
         var changeFeedMode = context.Request.Headers["x-ms-cosmos-changefeed-mode"].FirstOrDefault();
         var aimHeader = context.Request.Headers["A-IM"].FirstOrDefault() ?? "";
         var isAllVersions = changeFeedMode?.Equals("AllVersionsAndDeletes", StringComparison.OrdinalIgnoreCase) == true
@@ -366,7 +410,7 @@ public static class DocumentEndpoints
 
         if (isAllVersions)
         {
-            var entries = await cfRepo.ReadAllVersionsAndDeletesAsync(dbId, collId, partitionKey, afterLsn, maxItems);
+            var entries = await cfRepo.ReadAllVersionsAndDeletesAsync(dbId, collId, partitionKey, afterLsn, maxItems, epkRange);
 
             if (entries.Count == 0)
             {
@@ -407,7 +451,7 @@ public static class DocumentEndpoints
         else
         {
             // LatestVersion mode
-            var docs = await cfRepo.ReadLatestVersionAsync(dbId, collId, partitionKey, afterLsn, maxItems);
+            var docs = await cfRepo.ReadLatestVersionAsync(dbId, collId, partitionKey, afterLsn, maxItems, epkRange);
 
             if (docs.Count == 0)
             {

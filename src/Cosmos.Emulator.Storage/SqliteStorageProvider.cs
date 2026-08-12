@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Cosmos.Emulator.Core.Helpers;
 using Microsoft.Data.Sqlite;
 
 namespace Cosmos.Emulator.Storage;
@@ -20,6 +21,31 @@ internal static class SqliteScalarFunctions
         // Returning null for null input preserves Cosmos NULL semantics: UPPER(NULL) = NULL.
         connection.CreateFunction("UPPER", (string? s) => s?.ToUpperInvariant(), isDeterministic: true);
         connection.CreateFunction("LOWER", (string? s) => s?.ToLowerInvariant(), isDeterministic: true);
+
+        // Hashes a stored partition key into its effective partition key, so reads
+        // scoped to an EPK range (how the SDK expresses a hierarchical key prefix)
+        // can be filtered in SQL. See EpkFilter.
+        connection.CreateFunction(
+            EpkFilter.FunctionName,
+            (string? partitionKey) => partitionKey is null ? null : ComputeEpk(partitionKey),
+            isDeterministic: true);
+    }
+
+    // Distinct partition keys are few in practice, so memoising avoids re-parsing and
+    // re-hashing the same key once per row. Bounded so a large scan cannot grow it forever.
+    private const int EpkCacheLimit = 4096;
+    private static readonly ConcurrentDictionary<string, string> EpkCache = new();
+
+    private static string ComputeEpk(string partitionKey)
+    {
+        if (EpkCache.TryGetValue(partitionKey, out var cached))
+            return cached;
+
+        var epk = EffectivePartitionKey.Compute(partitionKey);
+        if (EpkCache.Count < EpkCacheLimit)
+            EpkCache[partitionKey] = epk;
+
+        return epk;
     }
 }
 

@@ -39,6 +39,13 @@ Port configurable via `CosmosEmulator:Port` in appsettings.json.
 - Patch: Add, Set, Replace, Remove, Increment — nested paths, multiple ops, etag precondition
 - Same document ID in different partitions
 
+### Hierarchical Partition Keys
+- Containers with 2 or 3 partition key paths (`kind: MultiHash`); definition round-trips to the SDK
+- Path count validated on create: 1–3 paths, else 400 (a `partitionKey` with no `paths` is also a 400, not a 500)
+- Full-key point reads, writes, deletes
+- **Prefix-scoped reads** — queries, read feed and change feed scoped to a partial key
+- Two wire shapes are honoured (see "Prefix partition keys" under SDK Compatibility)
+
 ### Queries
 - SELECT *, projections, VALUE, DISTINCT
 - WHERE with =, !=, <, >, <=, >=, AND, OR, NOT
@@ -101,6 +108,33 @@ The SDK rewrites user queries before sending to the server, using JSON object/ar
 - **Aggregates**: `SELECT VALUE [{"item": COUNT(1)}]` or `SELECT VALUE [{"item": {"sum": SUM(c.age), "count": COUNT(c.age)}}]`
 - These are handled natively by the parser (ObjectExpression/ArrayExpression) — no regex rewriting needed
 - `json(body)` wrapping in SQLite ensures full documents embed as sub-objects in `json_object()`, not strings
+
+### Prefix partition keys (hierarchical containers)
+For a **full** key the SDK sends `x-ms-documentdb-partitionkey: ["t1","u1"]`. For a
+**partial** key it sends no such header at all — it hashes the prefix client-side and
+sends an effective partition key (EPK) range instead:
+```
+x-ms-documentdb-partitionkeyrangeid: 0
+x-ms-start-epk: 3D48BB14DA9D090D22112C96695028B6
+x-ms-end-epk:   3D48BB14DA9D090D22112C96695028B6FF
+```
+So prefix support requires computing the EPK server-side, **bit-for-bit** identically —
+the two sides never compare notes. `EffectivePartitionKey.cs` implements it: each
+component is encoded as `[typeByte][payload]` (string `0x08`+UTF8+`0xFF`, number
+`0x05`+double LE, true `0x03`, false `0x02`, null `0x01`, absent `0x00`), hashed with
+MurmurHash3 x64 128 (seed 0), emitted big-endian with the top 2 bits of the leading
+byte cleared, and per-component hashes are **concatenated**. That concatenation is what
+makes a prefix a literal string prefix, so routing becomes a range scan.
+- Golden vectors in `EffectivePartitionKeyTests` were captured from the SDK's own
+  `ThinClientTransportSerializer.GetEffectivePartitionKeyHash` (Microsoft.Azure.Cosmos.Direct)
+  via reflection — regenerate them the same way if they ever need revisiting.
+- Applied in SQL through the `cosmos_epk` SQLite function (`EpkFilter`), not a stored
+  column, so it cannot drift from `partition_key` and no database file needs migrating.
+  The container-wide range (`""`..`"FF"`) is skipped rather than hashing every row.
+- The REST API also accepts a **shortened** `x-ms-documentdb-partitionkey` header, which
+  `PartitionKeyPredicate` handles by turning the canonical key array into an equality
+  probe plus a range over the keys nested beneath it. The .NET SDK never sends this
+  shape, but other clients do.
 
 ### Change Feed Modes
 - LatestVersion: `A-IM: Incremental Feed`
@@ -169,7 +203,7 @@ tests/
 
 ## Current Test Status
 
-101 integration tests + 7 unit tests. 0 skipped.
+124 integration tests + 33 unit tests. 0 skipped.
 
 ## Debugging Failing Tests
 

@@ -128,7 +128,7 @@ SELECT VALUE c.nickname ?? c.name FROM c
 - **TTL** — automatic document expiration with container `defaultTtl` and per-document `ttl` override
 - **Pagination** — `x-ms-max-item-count` and `x-ms-continuation` for all list/query endpoints
 - **HTTPS** — self-signed certificate on port 8081 (configurable)
-- **Partition keys** — full partition key support including hierarchical
+- **Partition keys** — single and hierarchical (sub-partitioned, up to 3 paths), including reads scoped to a partial key prefix
 
 ## Architecture
 

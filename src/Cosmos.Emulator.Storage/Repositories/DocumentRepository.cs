@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Cosmos.Emulator.Core.Helpers;
 using Cosmos.Emulator.Core.Models;
 using Cosmos.Emulator.Storage.Schema;
 using Microsoft.Data.Sqlite;
@@ -51,7 +52,7 @@ public class DocumentRepository
         return ReadDocument(reader);
     }
 
-    public List<CosmosDocument> List(string databaseId, string containerId, string? partitionKey = null, int maxItems = 100, string? continuationToken = null)
+    public List<CosmosDocument> List(string databaseId, string containerId, string? partitionKey = null, int maxItems = 100, string? continuationToken = null, EpkRange? epkRange = null)
     {
         using var conn = _storage.GetDatabaseConnection(databaseId);
         var table = Q(containerId);
@@ -60,8 +61,14 @@ public class DocumentRepository
         var where = "is_deleted = 0";
         if (partitionKey is not null)
         {
-            where += " AND partition_key = @pk";
-            cmd.Parameters.AddWithValue("@pk", partitionKey);
+            // A hierarchical container may be listed by a prefix of its key components.
+            where += " AND " + PartitionKeyPredicate.BuildSql("partition_key", "@pk");
+            BindPartitionKey(cmd, "@pk", partitionKey);
+        }
+        if (epkRange is { } epk)
+        {
+            where += " AND " + EpkFilter.BuildSql("partition_key", "@epk");
+            EpkFilter.Bind(cmd, "@epk", epk);
         }
 
         long offset = 0;
@@ -472,4 +479,15 @@ public class DocumentRepository
     }
 
     private static string Q(string name) => SchemaInitializer.QuoteName(name);
+
+    /// <summary>
+    /// Binds the three literals compared by <see cref="PartitionKeyPredicate.BuildSql"/>.
+    /// </summary>
+    private static void BindPartitionKey(SqliteCommand cmd, string paramPrefix, string partitionKey)
+    {
+        var bounds = PartitionKeyPredicate.Compute(partitionKey);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_exact", bounds.Exact);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_lo", bounds.RangeLow);
+        cmd.Parameters.AddWithValue($"{paramPrefix}_hi", bounds.RangeHigh);
+    }
 }
